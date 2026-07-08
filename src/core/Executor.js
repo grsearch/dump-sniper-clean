@@ -41,7 +41,7 @@ const {
 
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { normalizeRawTokenAmount, prepareBuyQuoteState } = require('../utils/firstBuyOnly');
+const { hasVerifiedExactReserves, prepareBuyQuoteState } = require('../utils/firstBuyOnly');
 
 // AllenHark Slipstream SDK (lazy load)
 let SlipstreamClient = null;
@@ -898,13 +898,11 @@ class Executor {
     // ============ DRY_RUN ============
     if (this.dryRun) {
       if (config.strategy.firstBuyOnly) {
-        const baseRaw = normalizeRawTokenAmount({ amount: order.poolBaseAfterRaw });
-        const quoteRaw = normalizeRawTokenAmount({ amount: order.poolQuoteAfterRaw });
-        if (!baseRaw || !quoteRaw || baseRaw === '0' || quoteRaw === '0') {
+        if (!hasVerifiedExactReserves(order)) {
           monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
           return {
             success: false,
-            error: 'first_buy_only: exact post-dump reserves unavailable',
+            error: 'first_buy_only: exact post-dump reserves not verified',
             firstBuyOnlyRejected: true,
             latencyMs: Date.now() - t0,
           };
@@ -1039,15 +1037,11 @@ class Executor {
         }
       }
       if (!swapState) {
-        const hasExactDumpReserves = Boolean(
-          normalizeRawTokenAmount({ amount: order?.poolBaseAfterRaw }) &&
-          normalizeRawTokenAmount({ amount: order?.poolQuoteAfterRaw }),
-        );
-        if (config.strategy.firstBuyOnly && !hasExactDumpReserves) {
+        if (config.strategy.firstBuyOnly && !hasVerifiedExactReserves(order)) {
           monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
           return {
             success: false,
-            error: 'first_buy_only: exact post-dump reserves unavailable',
+            error: 'first_buy_only: exact post-dump reserves not verified',
             firstBuyOnlyRejected: true,
             latencyMs: Date.now() - t0,
           };
@@ -1124,8 +1118,8 @@ class Executor {
       }
 
       // 严格首买模式只做内存替换：使用砸单 tx 的精确 post-token-balances
-      // 覆盖缓存中的旧储备，并用 0 滑点生成固定 baseAmountOut/maxQuoteAmountIn。
-      // 若前面已有买单令价格变差，PumpSwap 会在链上拒绝该交易。
+      // 覆盖缓存中的旧储备，并用 FIRST_BUY_SLIPPAGE_BPS 控制容差（默认 0）。
+      // 默认 0 时，若前面已有买单令价格变差，PumpSwap 会在链上拒绝该交易。
       let slippagePct;
       let exactReserveFence = false;
       try {
@@ -1134,6 +1128,7 @@ class Executor {
           order,
           firstBuyOnly: config.strategy.firstBuyOnly,
           buySlippageBps: config.strategy.buySlippageBps,
+          firstBuySlippageBps: config.strategy.firstBuySlippageBps,
         });
         swapState = prepared.swapState;
         slippagePct = prepared.slippagePct;

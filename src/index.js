@@ -666,6 +666,7 @@ async function main() {
         poolAddress: order.poolAddress || tokenInfo?.pool_address,
         poolBaseAfterRaw: order.poolBaseAfterRaw,
         poolQuoteAfterRaw: order.poolQuoteAfterRaw,
+        exactReserveSource: order.exactReserveSource,
       });
     } finally {
       signalEngine.markBuyDone(order.mint);

@@ -393,6 +393,7 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: parsed.poolQuoteVault,
       poolBaseAfterRaw: parsed.poolBaseAfterRaw || null,
       poolQuoteAfterRaw: parsed.poolQuoteAfterRaw || null,
+      exactReserveSource: parsed.exactReserveSource || null,
       priceAfter: parsed.priceAfter,
       priceBefore: parsed.priceBefore,
       baseDecimals: parsed.baseDecimals,
@@ -428,6 +429,7 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: parsed.poolQuoteVault,
       poolBaseAfterRaw: parsed.poolBaseAfterRaw || null,
       poolQuoteAfterRaw: parsed.poolQuoteAfterRaw || null,
+      exactReserveSource: parsed.exactReserveSource || null,
       baseDecimals: parsed.baseDecimals,
       quoteDecimals: parsed.quoteDecimals,
     });
@@ -536,6 +538,7 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: lastSell.poolQuoteVault,
       poolBaseAfterRaw: lastSell.poolBaseAfterRaw || null,
       poolQuoteAfterRaw: lastSell.poolQuoteAfterRaw || null,
+      exactReserveSource: lastSell.exactReserveSource || null,
       priceAfter: lastSell.priceAfter,
       priceBefore: firstSell.priceBefore,
       baseDecimals: lastSell.baseDecimals,
@@ -730,6 +733,9 @@ class DumpDetector extends EventEmitter {
     const quoteAfter = this._findBalance(postBalances, quoteVaultIdx, WSOL_MINT);
     const poolBaseAfterRaw = this._findRawBalance(postBalances, baseVaultIdx, baseMint);
     const poolQuoteAfterRaw = this._findRawBalance(postBalances, quoteVaultIdx, WSOL_MINT);
+    const exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
+      ? 'tx_post_balances'
+      : null;
 
     if (
       baseBefore === null || baseAfter === null ||
@@ -784,6 +790,7 @@ class DumpDetector extends EventEmitter {
       poolBaseAfter: baseAfter,
       poolBaseAfterRaw,
       poolQuoteAfterRaw,
+      exactReserveSource,
       _poolBaseDelta: poolBaseDelta,
       source: 'direct',
     };
@@ -812,6 +819,16 @@ class DumpDetector extends EventEmitter {
     // 1. 读 base_vault 余额变化
     const baseBefore = this._findBalance(preBalances, baseVaultIdx, baseMint);
     const baseAfter = this._findBalance(postBalances, baseVaultIdx, baseMint);
+    const quoteVaultIdx = poolQuoteVault
+      ? allKeys.findIndex((k) => k === poolQuoteVault)
+      : -1;
+    const poolBaseAfterRaw = this._findRawBalance(postBalances, baseVaultIdx, baseMint);
+    const poolQuoteAfterRaw = quoteVaultIdx >= 0
+      ? this._findRawBalance(postBalances, quoteVaultIdx, WSOL_MINT)
+      : null;
+    const exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
+      ? 'tx_post_balances'
+      : null;
 
     if (baseBefore === null || baseAfter === null) {
       monitor.inc('DumpDetector.cpiVaultBalanceMissing', 1, 'DumpDetector');
@@ -945,6 +962,9 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: poolQuoteVault || null,
       poolQuoteAfter,
       poolBaseAfter: baseAfter,
+      poolBaseAfterRaw,
+      poolQuoteAfterRaw,
+      exactReserveSource,
       _poolBaseDelta: poolBaseDelta,
       source: 'cpi',
     };
@@ -966,7 +986,7 @@ class DumpDetector extends EventEmitter {
   }
 
   /**
-   * 返回 token balance 的原始整数 amount 字符串，供严格零滑点买入使用。
+   * 返回 token balance 的原始整数 amount 字符串，供严格首买报价使用。
    * 不转换为 Number，避免大额 token 储备发生精度丢失。
    */
   _findRawBalance(balances, accountIndex, expectedMint) {
@@ -1256,6 +1276,7 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: poolQuoteVault || null,
       poolQuoteAfter,
       poolBaseAfter: 0,
+      exactReserveSource: null,
       source: 'balance_only',
     };
   }

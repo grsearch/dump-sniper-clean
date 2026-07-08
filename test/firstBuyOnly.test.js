@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const {
+  hasVerifiedExactReserves,
   normalizeRawTokenAmount,
   prepareBuyQuoteState,
 } = require('../src/utils/firstBuyOnly');
@@ -31,6 +32,7 @@ test('strict mode replaces cached reserves and forces zero slippage', () => {
     order: {
       poolBaseAfterRaw: '1234567890123456789',
       poolQuoteAfterRaw: '9876543210',
+      exactReserveSource: 'tx_post_balances',
     },
     firstBuyOnly: true,
     buySlippageBps: 2500,
@@ -58,12 +60,63 @@ test('strict mode fails closed when exact reserves or cache are unavailable', ()
   assert.throws(
     () => prepareBuyQuoteState({
       swapState: { pool: {} },
-      order: { poolBaseAfterRaw: '10' },
+      order: {
+        poolBaseAfterRaw: '10',
+        poolQuoteAfterRaw: '20',
+        exactReserveSource: 'cache_estimate',
+      },
+      firstBuyOnly: true,
+      buySlippageBps: 2500,
+    }),
+    /exact post-dump reserves not verified/,
+  );
+
+  assert.throws(
+    () => prepareBuyQuoteState({
+      swapState: { pool: {} },
+      order: {
+        poolBaseAfterRaw: '10',
+        exactReserveSource: 'tx_post_balances',
+      },
       firstBuyOnly: true,
       buySlippageBps: 2500,
     }),
     /exact post-dump reserves unavailable/,
   );
+});
+
+test('strict mode can be configured with a small first-buy tolerance', () => {
+  const result = prepareBuyQuoteState({
+    swapState: { pool: {} },
+    order: {
+      poolBaseAfterRaw: '1000',
+      poolQuoteAfterRaw: '2000',
+      exactReserveSource: 'tx_post_balances',
+    },
+    firstBuyOnly: true,
+    buySlippageBps: 2500,
+    firstBuySlippageBps: 100,
+  });
+
+  assert.equal(result.slippagePct, 1);
+  assert.equal(result.exactReserveFence, true);
+});
+
+test('verified exact reserves require tx post-balance source and both raw reserves', () => {
+  assert.equal(hasVerifiedExactReserves({
+    poolBaseAfterRaw: '10',
+    poolQuoteAfterRaw: '20',
+    exactReserveSource: 'tx_post_balances',
+  }), true);
+  assert.equal(hasVerifiedExactReserves({
+    poolBaseAfterRaw: '10',
+    poolQuoteAfterRaw: '20',
+    exactReserveSource: 'cache_estimate',
+  }), false);
+  assert.equal(hasVerifiedExactReserves({
+    poolBaseAfterRaw: '10',
+    exactReserveSource: 'tx_post_balances',
+  }), false);
 });
 
 test('normal mode preserves cached state and configured slippage', () => {
@@ -97,6 +150,7 @@ test('dump signal carries exact raw post-swap reserves without conversion', () =
     poolQuoteVault: 'quote-vault',
     poolBaseAfterRaw: '9876543210123456789',
     poolQuoteAfterRaw: '123456789012345678',
+    exactReserveSource: 'tx_post_balances',
     priceAfter: 1,
     priceBefore: 2,
     baseDecimals: 6,
@@ -105,6 +159,7 @@ test('dump signal carries exact raw post-swap reserves without conversion', () =
 
   assert.equal(emitted.poolBaseAfterRaw, '9876543210123456789');
   assert.equal(emitted.poolQuoteAfterRaw, '123456789012345678');
+  assert.equal(emitted.exactReserveSource, 'tx_post_balances');
   clearInterval(detector._recentSellCleanup);
   clearInterval(detector._processedSigCleanup);
 });
