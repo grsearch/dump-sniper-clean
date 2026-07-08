@@ -106,4 +106,17 @@ test('dump signal carries exact raw post-swap reserves without conversion', () =
   assert.equal(emitted.poolBaseAfterRaw, '9876543210123456789');
   assert.equal(emitted.poolQuoteAfterRaw, '123456789012345678');
   clearInterval(detector._recentSellCleanup);
+  clearInterval(detector._processedSigCleanup);
+});
+
+test('dump detector signature dedup state is initialized', () => {
+  const detector = new DumpDetector({ getByMint: () => null });
+
+  assert.doesNotThrow(() => detector.handleTransaction({
+    signature: Buffer.from(Array.from({ length: 64 }, (_, i) => i)),
+  }));
+  assert.equal(detector._processedSigs.size, 1);
+
+  clearInterval(detector._recentSellCleanup);
+  clearInterval(detector._processedSigCleanup);
 });

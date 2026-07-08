@@ -39,8 +39,9 @@ Solana / Pump.fun 砸盘反弹狙击机器人。本版本在保留原有**经过
 
 `FIRST_BUY_ONLY=true` 时，机器人直接使用触发砸单交易的精确 post-token-balances
 生成零滑点 PumpSwap 报价。若已有买单先改变池价，交易会在链上因滑点失败，而不是
-排在竞争者后方继续成交。缺少精确储备或 pool metadata cache miss 时会直接跳过，
-买入热路径不会为此等待额外 RPC。设为 `false` 可恢复 `BUY_SLIPPAGE_BPS` 行为。
+排在竞争者后方继续成交。缺少精确储备时会直接跳过；如果只是 pool metadata cache
+miss，会走一次同步 RPC fallback 获取元数据，再立刻用精确储备覆盖 reserve 字段。
+cache hit 的买入热路径不会为此等待额外 RPC。设为 `false` 可恢复 `BUY_SLIPPAGE_BPS` 行为。
 
 ---
 

@@ -254,6 +254,9 @@ class RegionStream {
         failed: false,
         accountInclude: JUPITER_PROGRAM_IDS,
         accountExclude: [],
+        // Do not require Pump AMM program ids here: Helius may miss them when
+        // they are only present via ALT-loaded addresses. accountInclude=mints
+        // keeps the stream scoped; DumpDetector performs the final parsing.
         accountRequired: [],
       };
     } else {
@@ -264,14 +267,7 @@ class RegionStream {
         failed: false,
         accountInclude: mints,
         accountExclude: [],
-        accountRequired: [PUMP_AMM_PROGRAM_ID],
-      };
-      const v2Filter = {
-        vote: false,
-        failed: false,
-        accountInclude: mints,
-        accountExclude: [],
-        accountRequired: [PUMP_AMM_V2_PROGRAM_ID],
+        accountRequired: [],
       };
     }
     const filter = SubscribeRequestFilterTransactions
@@ -299,14 +295,6 @@ class RegionStream {
       accountsDataSlice: [],
       commitment: CommitmentLevel.PROCESSED,
     };
-
-    // v3.17.38: 如果是 pumpAmm 模式，额外加 v2 AMM filter
-    if (this.filterMode !== 'jupiter' && typeof v2Filter !== 'undefined') {
-      const v2FilterObj = SubscribeRequestFilterTransactions
-        ? SubscribeRequestFilterTransactions.create(v2Filter)
-        : v2Filter;
-      requestPlain.transactions['pumpAmmV2Trades'] = v2FilterObj;
-    }
 
     // v3.17.40: replay 限制回看窗口
     //   Bug: currentSlot=0 时 cap 不生效 → LS 从旧 slot 开始推所有历史
