@@ -72,7 +72,10 @@ async function main() {
     });
     executor.setPoolStateCache(poolStateCache);
     dumpDetector.setPoolStateCache(poolStateCache);
-    poolStateCache.start();
+    await poolStateCache.start();
+    if ((process.env.POOL_STATE_PREWARM_ON_START ?? 'true').toLowerCase() === 'true') {
+      await prewarmPoolStateCache(poolStateCache, tokenRegistry);
+    }
   }
 
   // v3.17.31: 平仓后 5 分钟价格追踪(旁路,不影响主路径)
@@ -285,19 +288,25 @@ async function main() {
     }
   }, 3600_000);
 
-  // ============ v3.35: 自动移除超过24h的老币 ============
-  // 只监控24小时内的新币，超过自动从监控移除（is_active=0）
-  const TOKEN_MAX_AGE_MS = parseInt(process.env.TOKEN_MAX_AGE_MS || '86400000', 10); // 默认24h
-  setInterval(() => {
-    const removed = tokenRegistry.removeStaleByAge(TOKEN_MAX_AGE_MS);
-    if (removed > 0) {
-      // 通知 TickStream 和 PoolStateCache 更新
-      if (tickStream && tickStream.watchedMints) {
-        const activeMints = tokenRegistry.listActive().map(t => t.mint);
-        // TickStream 会在下次 tick 时自动重建
+  // ============ v3.35: 可选按币龄自动移除老币 ============
+  // 设置为 0 时关闭；否则 creation_time 超过该值会从监控移除（is_active=0）。
+  // Prefer MAX_TOKEN_AGE_MS; TOKEN_MAX_AGE_MS is kept only as a legacy alias.
+  const tokenMaxAgeRaw = process.env.MAX_TOKEN_AGE_MS ?? process.env.TOKEN_MAX_AGE_MS ?? '86400000';
+  const TOKEN_MAX_AGE_MS = parseInt(tokenMaxAgeRaw, 10);
+  if (Number.isFinite(TOKEN_MAX_AGE_MS) && TOKEN_MAX_AGE_MS > 0) {
+    setInterval(() => {
+      const removed = tokenRegistry.removeStaleByAge(TOKEN_MAX_AGE_MS);
+      if (removed > 0) {
+        // 通知 TickStream 和 PoolStateCache 更新
+        if (tickStream && tickStream.watchedMints) {
+          const activeMints = tokenRegistry.listActive().map(t => t.mint);
+          // TickStream 会在下次 tick 时自动重建
+        }
       }
-    }
-  }, 300_000); // 每5分钟检查一次
+    }, 300_000); // 每5分钟检查一次
+  } else {
+    console.log('[main] token age auto-remove disabled (TOKEN_MAX_AGE_MS/MAX_TOKEN_AGE_MS <= 0)');
+  }
 
   // ============ 定期补缺 pool 信息（每 60 秒扫描一次） ============
   // 防止 onTokenAdded 时 PoolFinder 失败导致代币永远没有 pool
@@ -909,6 +918,43 @@ async function fillPoolForToken(tokenRegistry, mint) {
   } catch (err) {
     console.warn(`[fill-pools] ${mint.slice(0, 6)}: ${err.message}`);
   }
+}
+
+async function prewarmPoolStateCache(poolStateCache, tokenRegistry) {
+  if (!poolStateCache || !tokenRegistry) return;
+
+  const tokens = tokenRegistry.listActive().filter((t) => t.pool_address);
+  if (tokens.length === 0) {
+    console.log('[main] PoolStateCache prewarm: 0/0 tokens (no pool_address)');
+    return;
+  }
+
+  const concurrency = Math.max(1, parseInt(process.env.POOL_STATE_PREWARM_CONCURRENCY || '8', 10));
+  const timeoutMs = Math.max(1000, parseInt(process.env.POOL_STATE_PREWARM_TIMEOUT_MS || '15000', 10));
+  const deadline = Date.now() + timeoutMs;
+
+  let cursor = 0;
+  let warmed = 0;
+
+  async function worker() {
+    while (Date.now() < deadline) {
+      const token = tokens[cursor++];
+      if (!token) return;
+
+      try {
+        poolStateCache.addHot(token.mint, token.pool_address, false);
+        await poolStateCache.refreshOne(token.pool_address);
+        if (poolStateCache.get(token.pool_address)) warmed++;
+      } catch (_) {
+        // Best effort only; periodic PoolStateCache refresh will keep trying.
+      }
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(concurrency, tokens.length) }, () => worker());
+  await Promise.allSettled(workers);
+
+  console.log(`[main] PoolStateCache prewarm: ${warmed}/${tokens.length} tokens`);
 }
 
 main().catch((err) => {
