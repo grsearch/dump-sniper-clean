@@ -1039,18 +1039,41 @@ class Executor {
         }
       }
       if (!swapState) {
-        if (config.strategy.firstBuyOnly) {
-          monitor.inc('Executor.firstBuyRejectedCacheMiss', 1, 'Executor');
+        const hasExactDumpReserves = Boolean(
+          normalizeRawTokenAmount({ amount: order?.poolBaseAfterRaw }) &&
+          normalizeRawTokenAmount({ amount: order?.poolQuoteAfterRaw }),
+        );
+        if (config.strategy.firstBuyOnly && !hasExactDumpReserves) {
+          monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
           return {
             success: false,
-            error: 'first_buy_only: pool metadata cache miss',
+            error: 'first_buy_only: exact post-dump reserves unavailable',
             firstBuyOnlyRejected: true,
             latencyMs: Date.now() - t0,
           };
         }
         // cache miss：第一次抓取或 cache 失效；走同步 RPC
-        swapState = await this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey);
-        monitor.inc('Executor.cacheMiss', 1, 'Executor');
+        try {
+          // In FIRST_BUY_ONLY mode this only supplies pool metadata; exact
+          // post-dump reserves below still replace the fetched reserve fields.
+          swapState = await this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey);
+          monitor.inc('Executor.cacheMiss', 1, 'Executor');
+          if (config.strategy.firstBuyOnly) {
+            monitor.inc('Executor.firstBuyRpcFallback', 1, 'Executor');
+            stateSource = 'rpc-fallback';
+          }
+        } catch (err) {
+          if (config.strategy.firstBuyOnly) {
+            monitor.inc('Executor.firstBuyRejectedCacheMiss', 1, 'Executor');
+            return {
+              success: false,
+              error: `first_buy_only: pool metadata rpc miss: ${err.message}`,
+              firstBuyOnlyRejected: true,
+              latencyMs: Date.now() - t0,
+            };
+          }
+          throw err;
+        }
       } else {
         monitor.inc('Executor.cacheHit', 1, 'Executor');
       }

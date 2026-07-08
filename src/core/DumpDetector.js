@@ -70,6 +70,16 @@ class DumpDetector extends EventEmitter {
     this.tokenRegistry = tokenRegistry;
     this.poolStateCache = null;
 
+    this._processedSigs = new Map();
+    this._sigDedupMs = 60_000;
+    this._processedSigCleanup = setInterval(() => {
+      const now = Date.now();
+      for (const [sig, expireAt] of this._processedSigs) {
+        if (expireAt <= now) this._processedSigs.delete(sig);
+      }
+    }, 30_000);
+    if (this._processedSigCleanup.unref) this._processedSigCleanup.unref();
+
     // v3.17.13: 短窗口累计砸盘追踪
     //   记录每个 mint 最近 N 秒内的所有卖出,用于检测 rug
     //   格式: mint → [{ sellSol, priceBefore, priceAfter, ts }, ...]
