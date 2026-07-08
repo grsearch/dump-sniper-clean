@@ -6,6 +6,7 @@
   "scripts": {
     "start": "node src/index.js",
     "dev": "node --trace-warnings src/index.js",
+    "test": "node --test test/*.test.js",
     "health": "node scripts/health.js",
     "health:json": "node scripts/health.js --json",
     "diagnose": "node scripts/diagnose.js",

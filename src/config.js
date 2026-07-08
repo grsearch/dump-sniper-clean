@@ -9,10 +9,10 @@ const config = {
   // ============ Strategy ============
   strategy: {
     // 触发条件（DumpDetector）
-    // v3.17.20 用户调参：MIN_SELL_SOL 6.0, MIN_PRICE_IMPACT_PCT 10.0
-    minSellSol: parseFloat(process.env.MIN_SELL_SOL || '20'),
-    minPriceImpactPct: parseFloat(process.env.MIN_PRICE_IMPACT_PCT || '10.0'),
-    minTriggerSellCount: parseInt(process.env.MIN_TRIGGER_SELL_COUNT || "2", 10),
+    // 当前入场阈值：单笔砸单 >=8 SOL、跌幅 >=8%、最近10秒至少1笔卖出
+    minSellSol: parseFloat(process.env.MIN_SELL_SOL || '8'),
+    minPriceImpactPct: parseFloat(process.env.MIN_PRICE_IMPACT_PCT || '8.0'),
+    minTriggerSellCount: parseInt(process.env.MIN_TRIGGER_SELL_COUNT || '1', 10),
     // v3.17.39: 距近期高点跌幅过滤 — 防止"高位接刀"(价格刚从 ATH 小幅回落就追入)
     minDropFromRecentHighPct: parseFloat(process.env.MIN_DROP_FROM_RECENT_HIGH_PCT || '0'),
     minDropLookbackSec: parseInt(process.env.MIN_DROP_LOOKBACK_SEC || '1200', 10),
@@ -114,7 +114,7 @@ const config = {
     //   clean:     30min (1800000ms) — 短线反弹策略, 超时强制退出
     maxHoldMs: parseInt(process.env.MAX_HOLD_MS || '1800000', 10),
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '1800000', 10),  // v3.17.40c: peakPnl<trailingActivate 超时割肉, 默认30min
-    slotExitGap: parseInt(process.env.SLOT_EXIT_GAP || '0', 10),  // 0 = disabled
+    slotExitGap: parseInt(process.env.SLOT_EXIT_GAP || '8', 10),  // >0 = enabled; 8 slots then force exit
 
     // v3.17.32: 防御模式 — 持仓超过 defenseActivateMs 后进入防御 trailing
     //   数据回测: 20 分钟是 PnL 拐点, 此后 peak<8% 的单平均亏 -17.8%
@@ -130,6 +130,9 @@ const config = {
     // 滑点
     buySlippageBps: parseInt(process.env.BUY_SLIPPAGE_BPS || '1500', 10),  // 15%
     sellSlippageBps: parseInt(process.env.SELL_SLIPPAGE_BPS || '2000', 10), // 20%
+    // 严格首买模式：用触发砸单 tx 的精确 post-token-balances 重算报价，
+    // 并把买入滑点设为 0。若精确储备或内存 pool metadata 缺失则跳过，热路径不补 RPC。
+    firstBuyOnly: (process.env.FIRST_BUY_ONLY ?? 'true').toLowerCase() === 'true',
 
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
