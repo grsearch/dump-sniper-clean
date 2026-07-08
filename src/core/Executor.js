@@ -961,6 +961,10 @@ class Executor {
       };
     }
 
+    let debugStateSource = 'not-started';
+    let debugSlippagePct = null;
+    let debugExactReserveFence = false;
+
     try {
       const poolKey = new PublicKey(order.poolAddress);
       const sizeLamportsBN = new BN(Math.floor(sizeSol * 1e9));
@@ -969,6 +973,7 @@ class Executor {
       const tS0 = Date.now();
       let swapState = null;
       let stateSource = 'rpc';
+      debugStateSource = stateSource;
       if (this.poolStateCache) {
         swapState = this.poolStateCache.get(order.poolAddress);
         if (swapState) {
@@ -1032,6 +1037,7 @@ class Executor {
             }
           }
           stateSource = 'cache';
+          debugStateSource = stateSource;
           const age = this.poolStateCache.getAge(order.poolAddress);
           monitor.set('Executor.lastCacheAgeMs', age || 0, 'Executor');
         }
@@ -1055,6 +1061,7 @@ class Executor {
           if (config.strategy.firstBuyOnly) {
             monitor.inc('Executor.firstBuyRpcFallback', 1, 'Executor');
             stateSource = 'rpc-fallback';
+            debugStateSource = stateSource;
           }
         } catch (err) {
           if (config.strategy.firstBuyOnly) {
@@ -1133,8 +1140,11 @@ class Executor {
         swapState = prepared.swapState;
         slippagePct = prepared.slippagePct;
         exactReserveFence = prepared.exactReserveFence;
+        debugSlippagePct = slippagePct;
+        debugExactReserveFence = exactReserveFence;
         if (exactReserveFence) {
           stateSource += '+exact-dump';
+          debugStateSource = stateSource;
           monitor.inc('Executor.firstBuyExactFenceBuilt', 1, 'Executor');
         }
       } catch (err) {
@@ -1225,7 +1235,7 @@ class Executor {
         `[Executor:LIVE] BUY submitted: ${(sig || '').slice(0, 8)}.. ` +
           `(state=${stateLatencyMs}ms[${stateSource}] build=${buildLatencyMs}ms send=${sendLatencyMs}ms total=${
             Date.now() - t0
-          }ms, fee=${feeInfo.totalLamports}L ${feeInfo.source})`,
+          }ms, reserve=${order.exactReserveSource || 'none'} slip=${slippagePct}% fee=${feeInfo.totalLamports}L ${feeInfo.source})`,
       );
 
       return {
@@ -1241,6 +1251,8 @@ class Executor {
         priorityFeeSource: feeInfo.source,
         sendLatencyMs,
         exactReserveFence,
+        exactReserveSource: order.exactReserveSource || null,
+        slippagePct,
         buySlot: this._latestBuySlot || null,  // 提交时的链上 slot
       };
     } catch (err) {
@@ -1251,8 +1263,19 @@ class Executor {
         symbol: order.symbol,
         sizeSol,
       });
-      console.error(`[Executor:LIVE] BUY failed: ${err.message}`);
-      return { success: false, error: err.message, latencyMs: Date.now() - t0 };
+      console.error(
+        `[Executor:LIVE] BUY failed: ${err.message} ` +
+        `(reserve=${order.exactReserveSource || 'none'} state=${debugStateSource} ` +
+        `slip=${debugSlippagePct ?? 'n/a'} exact=${debugExactReserveFence})`,
+      );
+      return {
+        success: false,
+        error: err.message,
+        latencyMs: Date.now() - t0,
+        exactReserveFence: debugExactReserveFence,
+        exactReserveSource: order.exactReserveSource || null,
+        slippagePct: debugSlippagePct,
+      };
     }
   }
 

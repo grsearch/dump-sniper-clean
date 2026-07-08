@@ -29,7 +29,7 @@ async function main() {
   console.log(`TP: +${config.strategy.takeProfitPct}% (immediate, no confirm)`);
   console.log(`Trailing: arm at +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% (priority: TP > trailing)`);
   console.log(`Trigger: sell>=${config.strategy.minSellSol} SOL, impact ${config.strategy.minPriceImpactPct}-${config.strategy.maxPriceImpactPct}%`);
-  console.log(`First-buy fence: ${config.strategy.firstBuyOnly ? 'ENABLED (exact reserves + 0 slippage)' : 'disabled'}`);
+  console.log(`First-buy fence: ${config.strategy.firstBuyOnly ? `ENABLED (verified reserves, tolerance ${config.strategy.firstBuySlippageBps}bps)` : 'disabled'}`);
   console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15s check)`);
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
@@ -626,7 +626,12 @@ async function main() {
 
   // ============ buyOrder → BUY → register position ============
   signalEngine.on('buyOrder', async (order) => {
-    console.log(`[main] buyOrder received: ${order.symbol || order.mint.slice(0,6)} mint=${order.mint.slice(0,8)}.. reason=${order.reason} sig=${order.signature?.slice(0,12)}..`);
+    console.log(
+      `[main] buyOrder received: ${order.symbol || order.mint.slice(0,6)} ` +
+      `mint=${order.mint.slice(0,8)}.. reason=${order.reason} ` +
+      `reserve=${order.exactReserveSource || 'none'} raw=${order.poolBaseAfterRaw && order.poolQuoteAfterRaw ? 'yes' : 'no'} ` +
+      `sig=${order.signature?.slice(0,12)}..`,
+    );
     const _t0 = Date.now();
     const tokenInfo = tokenRegistry.getToken(order.mint);
     const _t1 = Date.now();
@@ -715,7 +720,9 @@ async function main() {
 
     if (!buyResult.success) {
       console.error(
-        `[main] BUY failed for ${order.symbol || order.mint.slice(0, 6)}: ${buyResult.error}`,
+        `[main] BUY failed for ${order.symbol || order.mint.slice(0, 6)}: ${buyResult.error} ` +
+        `(reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'} ` +
+        `slip=${buyResult.slippagePct ?? 'n/a'} exact=${buyResult.exactReserveFence ?? false})`,
       );
       // v3.26: pool dead/low-liquidity/mint-mismatch → 24h 冷却，防止同币反复浪费 fee
       if (buyResult.poolDead || buyResult.poolLowLiquidity || buyResult.poolMintMismatch) {
