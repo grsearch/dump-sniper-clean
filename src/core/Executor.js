@@ -41,6 +41,7 @@ const {
 
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const { normalizeRawTokenAmount, prepareBuyQuoteState } = require('../utils/firstBuyOnly');
 
 // AllenHark Slipstream SDK (lazy load)
 let SlipstreamClient = null;
@@ -896,6 +897,19 @@ class Executor {
 
     // ============ DRY_RUN ============
     if (this.dryRun) {
+      if (config.strategy.firstBuyOnly) {
+        const baseRaw = normalizeRawTokenAmount({ amount: order.poolBaseAfterRaw });
+        const quoteRaw = normalizeRawTokenAmount({ amount: order.poolQuoteAfterRaw });
+        if (!baseRaw || !quoteRaw || baseRaw === '0' || quoteRaw === '0') {
+          monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
+          return {
+            success: false,
+            error: 'first_buy_only: exact post-dump reserves unavailable',
+            firstBuyOnlyRejected: true,
+            latencyMs: Date.now() - t0,
+          };
+        }
+      }
       const fillPrice = (order.priceAfter || 0) * 1.005;
       if (fillPrice <= 0) {
         monitor.inc('Executor.buyFail', 1, 'Executor');
@@ -919,6 +933,7 @@ class Executor {
         price: fillPrice,
         latencyMs: Date.now() - t0,
         dryRun: true,
+        exactReserveFence: config.strategy.firstBuyOnly,
       };
     }
 
@@ -951,8 +966,6 @@ class Executor {
     try {
       const poolKey = new PublicKey(order.poolAddress);
       const sizeLamportsBN = new BN(Math.floor(sizeSol * 1e9));
-      // SDK 接受 slippage 作为 percent 数（1% 写 1，不是 0.01）
-      const slippagePct = config.strategy.buySlippageBps / 100;
 
       // 1. 拉 pool state — v3.5 优先读缓存（PoolStateCache 后台预热）
       const tS0 = Date.now();
@@ -976,14 +989,14 @@ class Executor {
           }
           // 首次遇到：强制验一次 pool owner（仅 cache hit 才需要，cache miss 已走 RPC）
           if (!this.poolStateCache._ownerVerified?.has(order.poolAddress)) {
-            try {
-              const poolAcc = await this.rpc.getAccountInfo(new PublicKey(order.poolAddress));
-              const PUMP_AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
-              if (poolAcc && poolAcc.owner.toBase58() !== PUMP_AMM) {
+            const PUMP_AMM = 'pAMMBay6oceH9fJKBRHGP5D4bD4sWpmSwMn52FMfXEA';
+            const cachedOwner = swapState?.poolAccountInfo?.owner?.toBase58?.() || null;
+            if (cachedOwner) {
+              if (cachedOwner !== PUMP_AMM) {
                 this.poolStateCache.markDead(order.poolAddress);
                 monitor.inc('Executor.buyPoolDead', 1, 'Executor');
                 console.error(
-                  `[Executor:LIVE] 🚫 BUY ABORTED ${order.symbol || order.mint.slice(0, 6)}: pool migrated (owner=${poolAcc.owner.toBase58().slice(0,8)}.. ≠ pAMMBay)`,
+                  `[Executor:LIVE] 🚫 BUY ABORTED ${order.symbol || order.mint.slice(0, 6)}: pool migrated (owner=${cachedOwner.slice(0,8)}.. ≠ pAMMBay)`,
                 );
                 return {
                   success: false,
@@ -992,10 +1005,33 @@ class Executor {
                   latencyMs: Date.now() - t0,
                 };
               }
-              // owner OK，标记已验证，后续不再重复查
               if (!this.poolStateCache._ownerVerified) this.poolStateCache._ownerVerified = new Set();
               this.poolStateCache._ownerVerified.add(order.poolAddress);
-            } catch (_) { /* RPC 失败不阻塞 BUY */ }
+            } else if (config.strategy.firstBuyOnly) {
+              monitor.inc('Executor.firstBuyRejectedUnverifiedPool', 1, 'Executor');
+              return {
+                success: false,
+                error: 'first_buy_only: cached pool owner unavailable',
+                firstBuyOnlyRejected: true,
+                latencyMs: Date.now() - t0,
+              };
+            } else {
+              try {
+                const poolAcc = await this.rpc.getAccountInfo(new PublicKey(order.poolAddress));
+                if (poolAcc && poolAcc.owner.toBase58() !== PUMP_AMM) {
+                  this.poolStateCache.markDead(order.poolAddress);
+                  monitor.inc('Executor.buyPoolDead', 1, 'Executor');
+                  return {
+                    success: false,
+                    error: 'pool_dead: migrated to Raydium',
+                    poolDead: true,
+                    latencyMs: Date.now() - t0,
+                  };
+                }
+                if (!this.poolStateCache._ownerVerified) this.poolStateCache._ownerVerified = new Set();
+                this.poolStateCache._ownerVerified.add(order.poolAddress);
+              } catch (_) { /* RPC 失败不阻塞普通 BUY */ }
+            }
           }
           stateSource = 'cache';
           const age = this.poolStateCache.getAge(order.poolAddress);
@@ -1003,6 +1039,15 @@ class Executor {
         }
       }
       if (!swapState) {
+        if (config.strategy.firstBuyOnly) {
+          monitor.inc('Executor.firstBuyRejectedCacheMiss', 1, 'Executor');
+          return {
+            success: false,
+            error: 'first_buy_only: pool metadata cache miss',
+            firstBuyOnlyRejected: true,
+            latencyMs: Date.now() - t0,
+          };
+        }
         // cache miss：第一次抓取或 cache 失效；走同步 RPC
         swapState = await this.onlineSdk.swapSolanaState(poolKey, this.keypair.publicKey);
         monitor.inc('Executor.cacheMiss', 1, 'Executor');
@@ -1051,6 +1096,35 @@ class Executor {
           success: false,
           error: 'pool_dead: marked dead (IncorrectProgramId / migrated)',
           poolDead: true,
+          latencyMs: Date.now() - t0,
+        };
+      }
+
+      // 严格首买模式只做内存替换：使用砸单 tx 的精确 post-token-balances
+      // 覆盖缓存中的旧储备，并用 0 滑点生成固定 baseAmountOut/maxQuoteAmountIn。
+      // 若前面已有买单令价格变差，PumpSwap 会在链上拒绝该交易。
+      let slippagePct;
+      let exactReserveFence = false;
+      try {
+        const prepared = prepareBuyQuoteState({
+          swapState,
+          order,
+          firstBuyOnly: config.strategy.firstBuyOnly,
+          buySlippageBps: config.strategy.buySlippageBps,
+        });
+        swapState = prepared.swapState;
+        slippagePct = prepared.slippagePct;
+        exactReserveFence = prepared.exactReserveFence;
+        if (exactReserveFence) {
+          stateSource += '+exact-dump';
+          monitor.inc('Executor.firstBuyExactFenceBuilt', 1, 'Executor');
+        }
+      } catch (err) {
+        monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
+        return {
+          success: false,
+          error: err.message,
+          firstBuyOnlyRejected: true,
           latencyMs: Date.now() - t0,
         };
       }
@@ -1148,6 +1222,7 @@ class Executor {
         priorityFeeLamports: feeInfo.totalLamports,
         priorityFeeSource: feeInfo.source,
         sendLatencyMs,
+        exactReserveFence,
         buySlot: this._latestBuySlot || null,  // 提交时的链上 slot
       };
     } catch (err) {

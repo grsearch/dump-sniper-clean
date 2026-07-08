@@ -29,6 +29,7 @@ async function main() {
   console.log(`TP: +${config.strategy.takeProfitPct}% (immediate, no confirm)`);
   console.log(`Trailing: arm at +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% (priority: TP > trailing)`);
   console.log(`Trigger: sell>=${config.strategy.minSellSol} SOL, impact ${config.strategy.minPriceImpactPct}-${config.strategy.maxPriceImpactPct}%`);
+  console.log(`First-buy fence: ${config.strategy.firstBuyOnly ? 'ENABLED (exact reserves + 0 slippage)' : 'disabled'}`);
   console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15s check)`);
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);
@@ -639,12 +640,11 @@ async function main() {
     // v3.17.11: BUY 前记录当前链上 slot，用于 SLOT_EXIT 策略
     executor.setLatestSlot(tickStream.latestSlot || 0);
 
-    // v3.17.27: 同步刷新 pool state → 确保 executor.buy cache hit
-    //   如果 cache miss，executor.buy 会走同步 RPC(80-180ms)。
-    //   在这里同步 refreshOne(30-80ms) 把 state 填入 cache，
-    //   buy 时直接 cache hit → state=0ms → 总延迟从 ~150ms 降到 ~60ms。
-    const preBuyPoolAddr = tokenInfo?.pool_address;
-    if (preBuyPoolAddr && executor.poolStateCache) {
+    // 普通模式保留旧的同步 cache-miss 刷新。
+    // 严格首买模式绝不在热路径补 RPC：cache miss 会由 Executor 快速拒绝，
+    // 正常命中依赖前面的 SS pre-warm / 后台 PoolStateCache。
+    const preBuyPoolAddr = order.poolAddress || tokenInfo?.pool_address;
+    if (!config.strategy.firstBuyOnly && preBuyPoolAddr && executor.poolStateCache) {
       const cachedState = executor.poolStateCache.get(preBuyPoolAddr);
       if (!cachedState) {
         const tPre = Date.now();
@@ -662,7 +662,10 @@ async function main() {
         sizeSol: order.sizeSol,
         priceAfter: order.priceAfter, // 用于 DRY_RUN 模拟
         baseDecimals: order.baseDecimals ?? tokenInfo?.decimals ?? 6,
-        poolAddress: tokenInfo?.pool_address, // Pump SDK 需要 pool address
+        // dumpSignal 中的 pool 是本次实际成交池，优先级高于 registry 的缓存值。
+        poolAddress: order.poolAddress || tokenInfo?.pool_address,
+        poolBaseAfterRaw: order.poolBaseAfterRaw,
+        poolQuoteAfterRaw: order.poolQuoteAfterRaw,
       });
     } finally {
       signalEngine.markBuyDone(order.mint);

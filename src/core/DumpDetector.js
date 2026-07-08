@@ -31,6 +31,7 @@ const bs58Lib = require('bs58');
 const bs58 = bs58Lib.default || bs58Lib;
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const { normalizeRawTokenAmount } = require('../utils/firstBuyOnly');
 
 const monitor = getMonitor();
 monitor.registerModule('DumpDetector', { staleMs: 120_000, label: 'Dump Detector' });
@@ -380,6 +381,8 @@ class DumpDetector extends EventEmitter {
       poolAddress: parsed.poolAddress,
       poolBaseVault: parsed.poolBaseVault,
       poolQuoteVault: parsed.poolQuoteVault,
+      poolBaseAfterRaw: parsed.poolBaseAfterRaw || null,
+      poolQuoteAfterRaw: parsed.poolQuoteAfterRaw || null,
       priceAfter: parsed.priceAfter,
       priceBefore: parsed.priceBefore,
       baseDecimals: parsed.baseDecimals,
@@ -413,6 +416,8 @@ class DumpDetector extends EventEmitter {
       priceAfter: parsed.priceAfter,
       poolBaseVault: parsed.poolBaseVault,
       poolQuoteVault: parsed.poolQuoteVault,
+      poolBaseAfterRaw: parsed.poolBaseAfterRaw || null,
+      poolQuoteAfterRaw: parsed.poolQuoteAfterRaw || null,
       baseDecimals: parsed.baseDecimals,
       quoteDecimals: parsed.quoteDecimals,
     });
@@ -519,6 +524,8 @@ class DumpDetector extends EventEmitter {
       poolAddress: lastSell.poolAddress,
       poolBaseVault: lastSell.poolBaseVault,
       poolQuoteVault: lastSell.poolQuoteVault,
+      poolBaseAfterRaw: lastSell.poolBaseAfterRaw || null,
+      poolQuoteAfterRaw: lastSell.poolQuoteAfterRaw || null,
       priceAfter: lastSell.priceAfter,
       priceBefore: firstSell.priceBefore,
       baseDecimals: lastSell.baseDecimals,
@@ -711,6 +718,8 @@ class DumpDetector extends EventEmitter {
     const baseAfter = this._findBalance(postBalances, baseVaultIdx, baseMint);
     const quoteBefore = this._findBalance(preBalances, quoteVaultIdx, WSOL_MINT);
     const quoteAfter = this._findBalance(postBalances, quoteVaultIdx, WSOL_MINT);
+    const poolBaseAfterRaw = this._findRawBalance(postBalances, baseVaultIdx, baseMint);
+    const poolQuoteAfterRaw = this._findRawBalance(postBalances, quoteVaultIdx, WSOL_MINT);
 
     if (
       baseBefore === null || baseAfter === null ||
@@ -763,6 +772,8 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault,
       poolQuoteAfter: quoteAfter,
       poolBaseAfter: baseAfter,
+      poolBaseAfterRaw,
+      poolQuoteAfterRaw,
       _poolBaseDelta: poolBaseDelta,
       source: 'direct',
     };
@@ -940,6 +951,19 @@ class DumpDetector extends EventEmitter {
       const v = safeTokenAmount(b.uiTokenAmount);
       if (v <= 0 && b.uiTokenAmount?.amount !== '0') return null; // amount有值但解析0 → 异常
       return v;
+    }
+    return null;
+  }
+
+  /**
+   * 返回 token balance 的原始整数 amount 字符串，供严格零滑点买入使用。
+   * 不转换为 Number，避免大额 token 储备发生精度丢失。
+   */
+  _findRawBalance(balances, accountIndex, expectedMint) {
+    for (const b of balances) {
+      if (b.accountIndex !== accountIndex) continue;
+      if (expectedMint && b.mint !== expectedMint) continue;
+      return normalizeRawTokenAmount(b.uiTokenAmount);
     }
     return null;
   }
