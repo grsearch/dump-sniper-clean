@@ -524,12 +524,10 @@ class SignalEngine extends EventEmitter {
     }
 
     // ============ v3.17.42: RSI(7,30s) oversold filter ============
-    // 数据支撑(7天回测1143笔):
-    //   RSI(7,30s) < 35: 净-22.6 SOL, 拒绝后少赚13.2 少亏35.8 净+22.6 SOL/7天
-    //   RSI < 25 = 持续急跌，不要抄底
-    //   RSI 35-40 = 最佳反弹区间
-    //   Pump.fun币RSI低不是"超卖反弹"，而是"还在跌"
-    {
+    // Disabled by default: it conflicts with the current dump-sniper entry
+    // style and has rejected valid large dump signals in live trading.
+    // IMPORTANT: old RSI_30S_MIN alone no longer enables this filter.
+    if ((process.env.RSI_30S_OVERSOLD_FILTER || 'false').toLowerCase() === 'true') {
       const rsi30sMin = parseFloat(process.env.RSI_30S_MIN || '35');
       if (rsi30sMin > 0 && this.rsiCalculator) {
         const snap = this.rsiCalculator.snapshot(mint, 20);
