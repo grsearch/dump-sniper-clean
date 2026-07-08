@@ -53,7 +53,9 @@ class TokenWatchdog {
       : config.strategy.minLpSol;
 
     // v3.29: 代币年龄过滤 — creation_time 超过此值的代币自动移除监控（减少 watchlist 压力）
-    this.maxTokenAgeMs = parseInt(process.env.MAX_TOKEN_AGE_MS || '86400000', 10); // 默认 24h
+    const maxTokenAgeRaw = process.env.MAX_TOKEN_AGE_MS ?? process.env.TOKEN_MAX_AGE_MS ?? '86400000';
+    this.maxTokenAgeMs = parseInt(maxTokenAgeRaw, 10);
+    if (!Number.isFinite(this.maxTokenAgeMs)) this.maxTokenAgeMs = 86400000;
 
     this._pendingExitMints = new Set();
     this._checkInterval = null;
