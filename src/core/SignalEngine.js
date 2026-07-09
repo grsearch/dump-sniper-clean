@@ -239,6 +239,30 @@ class SignalEngine extends EventEmitter {
       }
     }
 
+    // v3.33: future-slot guard — reject signals whose dump slot is ahead of
+    // our local slot view. This is a zero-RPC in-memory check that prevents the
+    // "BUY appears before dump" path when the tx stream outruns SlotSub/SS.
+    const maxFutureDumpSlotGap = config.strategy.maxFutureDumpSlotGap;
+    if (maxFutureDumpSlotGap >= 0 && slot && this.tickStream) {
+      let refSlot = this.tickStream._latestSlot || 0;
+      let refSource = 'latestSlot';
+      if (refSlot === 0) {
+        refSlot = this.tickStream._latestSlotFromSlotUpdate || 0;
+        refSource = 'slotUpdate';
+      }
+      if (refSlot > 0) {
+        const futureGap = slot - refSlot;
+        if (futureGap > maxFutureDumpSlotGap) {
+          monitor.inc('SignalEngine.rejectedFutureDumpSlot', 1, 'SignalEngine');
+          this._logReject(
+            signal,
+            `future dump slot: dump@${slot}, ${refSource}@${refSlot}, future_gap=${futureGap} (>${maxFutureDumpSlotGap})`,
+          );
+          return;
+        }
+      }
+    }
+
     // v3.32b: push lag 检查 — 墙钟差 > 阈值 → 信号太旧拒绝
     //   EMA策略同一bug的修复方案：不用 slotGap×400ms（SS天然领先87-170 slots会误杀），
     //   直接用 Date.now() - signal.ts 计算真实墙钟延迟

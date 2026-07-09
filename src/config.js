@@ -114,7 +114,7 @@ const config = {
     //   clean:     30min (1800000ms) — 短线反弹策略, 超时强制退出
     maxHoldMs: parseInt(process.env.MAX_HOLD_MS || '1800000', 10),
     lowPeakTimeoutMs: parseInt(process.env.LOW_PEAK_TIMEOUT_MS || '1800000', 10),  // v3.17.40c: peakPnl<trailingActivate 超时割肉, 默认30min
-    slotExitGap: parseInt(process.env.SLOT_EXIT_GAP || '8', 10),  // >0 = enabled; 8 slots then force exit
+    slotExitGap: parseInt(process.env.SLOT_EXIT_GAP || '6', 10),  // >0 = enabled; 6 slots then force exit
 
     // v3.17.32: 防御模式 — 持仓超过 defenseActivateMs 后进入防御 trailing
     //   数据回测: 20 分钟是 PnL 拐点, 此后 peak<8% 的单平均亏 -17.8%
@@ -165,6 +165,11 @@ const config = {
     //     10 slot 给 race + Sender 通道延迟留余量,超过则确实是 LaserStream 慢 region 重推。
     //   设 0 禁用此检查（恢复旧行为）
     maxSignalSlotGap: parseInt(process.env.MAX_SIGNAL_SLOT_GAP || '10', 10),
+    // Guard against "future-slot" dump signals. If the dump tx slot is ahead
+    // of our local slot view, submitting immediately can look like we bought
+    // before the dump. This is an in-memory check only (no RPC / no preflight).
+    // 0 = require local slot >= dump slot; -1 = disable.
+    maxFutureDumpSlotGap: parseInt(process.env.MAX_FUTURE_DUMP_SLOT_GAP || '0', 10),
     // v3.17.29: push lag 阈值 — 砸盘落链到我们收到处理的最大墙钟差(ms)
     // 超过此阈值即拒(反弹已经过了,买在山顶)
     // 设 0 禁用此检查(fallback 旧的 slot gap 路径)
