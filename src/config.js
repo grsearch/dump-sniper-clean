@@ -168,8 +168,9 @@ const config = {
     // Guard against "future-slot" dump signals. If the dump tx slot is ahead
     // of our local slot view, submitting immediately can look like we bought
     // before the dump. This is an in-memory check only (no RPC / no preflight).
-    // 0 = require local slot >= dump slot; -1 = disable.
-    maxFutureDumpSlotGap: parseInt(process.env.MAX_FUTURE_DUMP_SLOT_GAP || '0', 10),
+    // 1 tolerates the normal one-slot skew where tx stream arrives just before
+    // SlotSub/latestSlot catches up; -1 = disable.
+    maxFutureDumpSlotGap: parseInt(process.env.MAX_FUTURE_DUMP_SLOT_GAP || '1', 10),
     // v3.17.29: push lag 阈值 — 砸盘落链到我们收到处理的最大墙钟差(ms)
     // 超过此阈值即拒(反弹已经过了,买在山顶)
     // 设 0 禁用此检查(fallback 旧的 slot gap 路径)
