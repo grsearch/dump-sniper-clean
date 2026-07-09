@@ -402,7 +402,7 @@ class PositionManager extends EventEmitter {
    * @param {string} p.signature
    * @param {number} [p.buyFeeLamports] - BUY tx 的 priority fee + base fee (lamports)
    */
-  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
+  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySubmitMode = null, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
     const pid = positionId || crypto.randomUUID();
     const pos = {
       positionId: pid,
@@ -415,6 +415,7 @@ class PositionManager extends EventEmitter {
       dryRun: !!dryRun,
       buySignature: signature,
       buyFeeLamports: buyFeeLamports || 0,  // v3.4: 真实成本
+      buySubmitMode: buySubmitMode || null,
       sellFeeLamports: 0,                    // 卖出时累加（包括所有重试的 fee）
       buySlot: buySlot || 0,                // v3.17.11: BUY 时的链上 slot
       dumpSlot: dumpSlot || 0,              // v3.17.19: 砸单的链上 slot (用于计算 BUY 落链领先几个 slot)
@@ -570,7 +571,9 @@ class PositionManager extends EventEmitter {
               `still un-reconciled after 60s, no tokens in wallet → forcing BUY_CHAIN_FAILED`,
           );
           monitor.inc('PositionManager.reconcileWatchdog', 1, 'PositionManager');
-          const feeSol = ((p.buyFeeLamports || 0) + 5000) / 1e9;
+          const feeSol = p.buySubmitMode === 'jito_bundle_only'
+            ? 0
+            : ((p.buyFeeLamports || 0) + 5000) / 1e9;
           try {
             this.tradeLogger.closePosition(pid, {
               closedAt: Date.now(),
@@ -638,17 +641,21 @@ class PositionManager extends EventEmitter {
           `sig=${signature.slice(0, 8)}.. error=${errMsg}`,
       );
 
-      // 真实损失 = 已付 priority fee + base fee（链上 tx 失败也扣 fee）
-      // 没买到 token，所以 exitSol = 0, tokenAmount 应该是 0
-      const feeSol = ((pos.buyFeeLamports || 0) + 5000) / 1e9;
+      // On-chain failed tx burns base/priority fee. A not_landed bundleOnly tx
+      // should not be charged as a landed failure; Jito revert protection means
+      // it was not forwarded as a normal executed transaction.
+      const notLanded = errMsg === 'not_landed';
+      const feeSol = notLanded ? 0 : ((pos.buyFeeLamports || 0) + 5000) / 1e9;
+      const exitReason = notLanded ? 'BUY_NOT_LANDED' : 'BUY_CHAIN_FAILED';
+      const pnlPct = feeSol > 0 ? -100 : 0;
 
       this.tradeLogger.closePosition(positionId, {
         closedAt: Date.now(),
         exitPrice: pos.entryPrice,
         exitSol: 0,
         pnlSol: -feeSol, // 仅损失 fee
-        pnlPct: -100,
-        exitReason: 'BUY_CHAIN_FAILED',
+        pnlPct,
+        exitReason,
         sellSignature: null,
       });
 
@@ -694,9 +701,9 @@ class PositionManager extends EventEmitter {
         positionId,
         mint,
         symbol: pos.symbol,
-        exitReason: 'BUY_CHAIN_FAILED',
+        exitReason,
         pnlSol: -feeSol,
-        pnlPct: -100,
+        pnlPct,
       });
       return;
     }

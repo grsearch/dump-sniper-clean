@@ -771,6 +771,7 @@ async function main() {
       dryRun: config.DRY_RUN,
       signature: buyResult.signature,
       buyFeeLamports: buyResult.priorityFeeLamports || 0,  // v3.4: 用于真实 PnL
+      buySubmitMode: buyResult.submitMode || null,
       buySlot: buyResult.buySlot || 0,  // v3.17.11: BUY 时的链上 slot
       dumpSlot: order.slot || 0,        // v3.17.19: 砸单的 slot,用于算 BUY 落链领先几个 slot
       entryFdv,                          // v3.17.21: 买入瞬间 FDV

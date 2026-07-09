@@ -171,6 +171,29 @@ class Executor {
       '4TQLFNWK8AovT1gFvda5jfw2oJeRMKEmw7aH6MGBJ3or',
     ];
 
+    // ============ Jito Block Engine bundleOnly ============
+    // bundleOnly=true gives revert protection at the submitter layer: if the
+    // transaction cannot be included successfully, Jito should not forward it
+    // as a normal public transaction. No simulation is added to the hot path.
+    this.buySubmitMode = (process.env.BUY_SUBMIT_MODE || 'race').toLowerCase();
+    this.buySignalFeeTiering = (process.env.BUY_SIGNAL_FEE_TIERING ?? 'false').toLowerCase() === 'true';
+    this.lowConfidenceBuyFeeLamports = parseInt(process.env.LOW_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS || '300000', 10);
+    this.jitoBlockEngineUrl = (process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf').replace(/\/+$/, '');
+    this.jitoBundleTimeoutMs = parseInt(process.env.JITO_BUNDLE_TIMEOUT_MS || '1200', 10);
+    this.jitoBundleTipLamports = parseInt(process.env.JITO_BUNDLE_TIP_LAMPORTS || process.env.JITO_TIP_LAMPORTS || '1000000', 10);
+    this.jitoAuthUuid = process.env.JITO_AUTH_UUID || '';
+    this.jitoBundleTipAccounts = (process.env.JITO_BUNDLE_TIP_ACCOUNTS || '')
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!this.dryRun && this.buySubmitMode === 'jito_bundle_only') {
+      console.log(
+        `[Executor] BUY submit mode: Jito bundleOnly ` +
+        `(tip=${this.jitoBundleTipLamports}L, lowFee=${this.lowConfidenceBuyFeeLamports}L)`,
+      );
+      this._refreshJitoTipAccounts().catch(() => {});
+    }
+
     // ============ Priority fee oracle ============
     const PriorityFeeOracle = require('../utils/priorityFeeOracle');
     this.feeOracle = new PriorityFeeOracle({ cuLimit: this.computeUnitLimit });
@@ -453,6 +476,32 @@ class Executor {
     }
   }
 
+  async _refreshJitoTipAccounts() {
+    if (this.jitoBundleTipAccounts.length > 0) return;
+    try {
+      const axios = require('axios');
+      const headers = this.jitoAuthUuid ? { 'x-jito-auth': this.jitoAuthUuid } : {};
+      const { data } = await axios.post(
+        `${this.jitoBlockEngineUrl}/api/v1/bundles`,
+        {
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'getTipAccounts',
+          params: [],
+        },
+        { timeout: 1500, headers },
+      );
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      const accounts = Array.isArray(data.result) ? data.result.filter(Boolean) : [];
+      if (accounts.length === 0) throw new Error('empty getTipAccounts result');
+      this.jitoBundleTipAccounts = accounts;
+      console.log(`[Executor:Jito] loaded ${accounts.length} bundle tip account(s)`);
+    } catch (err) {
+      monitor.recordError('Executor', err, { phase: 'jito_tip_accounts' });
+      console.warn(`[Executor:Jito] getTipAccounts failed: ${err.message}`);
+    }
+  }
+
   stop() {
     if (this._blockhashTimer) {
       clearInterval(this._blockhashTimer);
@@ -514,12 +563,16 @@ class Executor {
    * @param {Buffer} serialized
    * @param {'BUY'|'SELL'} side
    */
-  async _submitTx(serialized, side) {
+  async _submitTx(serialized, side, submitOptions = {}) {
     // v3.17.14: BUY 三路并发提交 (Slipstream + Helius Sender + Staked RPC)
     //           同时提交到三个通道，拿第一个返回的 signature
     //           其余请求被 Solana 节点的重复 sig 检测自动忽略
     //           SELL 仍走 staked RPC（不需要抢 slot）
     if (side === 'BUY') {
+      if (submitOptions.submitMode === 'jito_bundle_only') {
+        return await this._submitToJitoBundleOnly(serialized);
+      }
+
       // 首个成功的 racer 立即 resolve，全部失败才 reject
       const racers = [];
 
@@ -599,6 +652,44 @@ class Executor {
       skipPreflight: true,
       maxRetries: 0,
     });
+  }
+
+  async _submitToJitoBundleOnly(serialized) {
+    const axios = require('axios');
+    const body = {
+      jsonrpc: '2.0',
+      id: 1,
+      method: 'sendTransaction',
+      params: [
+        Buffer.from(serialized).toString('base64'),
+        { encoding: 'base64' },
+      ],
+    };
+    const headers = this.jitoAuthUuid ? { 'x-jito-auth': this.jitoAuthUuid } : {};
+    const t0 = Date.now();
+    const url = `${this.jitoBlockEngineUrl}/api/v1/transactions?bundleOnly=true`;
+
+    try {
+      const { data, headers: resHeaders } = await axios.post(url, body, {
+        timeout: this.jitoBundleTimeoutMs,
+        headers,
+      });
+      if (data.error) throw new Error(JSON.stringify(data.error));
+      const sig = data.result;
+      const bundleId = resHeaders?.['x-bundle-id'] || resHeaders?.['X-Bundle-Id'] || null;
+      const elapsedMs = Date.now() - t0;
+      monitor.inc('Executor.jitoBundleOnlySubmitted', 1, 'Executor');
+      monitor.set('Executor.jitoBundleOnlySubmitMs', elapsedMs, 'Executor');
+      console.log(
+        `[Executor:Jito] bundleOnly submitted sig=${sig?.slice(0, 8) || 'n/a'}.. ` +
+        `bundle=${bundleId ? String(bundleId).slice(0, 8) + '..' : 'n/a'} total=${elapsedMs}ms`,
+      );
+      return sig;
+    } catch (err) {
+      monitor.inc('Executor.jitoBundleOnlyFailed', 1, 'Executor');
+      monitor.recordError('Executor', err, { phase: 'jito_bundle_only_submit' });
+      throw err;
+    }
   }
 
   /**
@@ -812,11 +903,11 @@ class Executor {
    * 构造、签名 tx。Side ('BUY' or 'SELL') 决定使用哪个 priority fee 等级。
    * v3.13: BUY 自动注入 Jito tip 指令（如果配置了 JITO_TIP_LAMPORTS）
    */
-  async _buildAndSignTx(swapInstructions, side, mint, baseTokenProgram = null) {
+  async _buildAndSignTx(swapInstructions, side, mint, baseTokenProgram = null, buildOptions = {}) {
     const blockhash = await this._getBlockhash();
 
     // v3.8: oracle.estimate 现在是同步调用（内存读，永不阻塞）
-    const fee = this.feeOracle.estimate(side);
+    const fee = this._estimatePriorityFee(side, buildOptions.feeMode);
     monitor.set(`Executor.last${side}FeeLamports`, fee.totalLamports, 'Executor');
 
     const ixs = [
@@ -826,10 +917,25 @@ class Executor {
       ixs.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: fee.microLamportsPerCu }));
     }
 
-    // v3.13: BUY 注入 Jito tip（仅当走 Sender + 配置了 tip）
+    // v3.13: BUY 注入 tip（Sender 或 Jito bundleOnly）
     // 走 Jito 拍卖通道，跟 3fZftz6m 这类用 bundle 的对手在同一战场竞争
     // v3.17: senderEndpoints 数组任一可用都注入 tip
-    if (side === 'BUY' && this.senderEndpoints.length > 0 && this.jitoTipLamports > 0) {
+    if (side === 'BUY' && buildOptions.submitMode === 'jito_bundle_only') {
+      if (this.jitoBundleTipLamports > 0 && this.jitoBundleTipAccounts.length === 0) {
+        throw new Error('jito_bundle_only: no Jito tip account available');
+      }
+      if (this.jitoBundleTipLamports > 0) {
+        const tipAccount = this.jitoBundleTipAccounts[Math.floor(Math.random() * this.jitoBundleTipAccounts.length)];
+        ixs.push(
+          SystemProgram.transfer({
+            fromPubkey: this.keypair.publicKey,
+            toPubkey: new PublicKey(tipAccount),
+            lamports: this.jitoBundleTipLamports,
+          }),
+        );
+        monitor.inc('Executor.jitoBundleTipsBuilt', 1, 'Executor');
+      }
+    } else if (side === 'BUY' && this.senderEndpoints.length > 0 && this.jitoTipLamports > 0) {
       const tipAccount = this.jitoTipAccounts[Math.floor(Math.random() * this.jitoTipAccounts.length)];
       ixs.push(
         SystemProgram.transfer({
@@ -882,6 +988,37 @@ class Executor {
     const tx = new VersionedTransaction(message);
     tx.sign([this.keypair]);
     return { serialized: tx.serialize(), feeInfo: fee };
+  }
+
+  _estimatePriorityFee(side, feeMode = 'normal') {
+    if (side === 'BUY' && feeMode === 'low_confidence') {
+      const totalLamports = Math.max(0, Number(this.lowConfidenceBuyFeeLamports) || 0);
+      const microLamportsPerCu = Math.floor((totalLamports * 1_000_000) / this.computeUnitLimit);
+      return { totalLamports, microLamportsPerCu, source: 'low_confidence' };
+    }
+    return this.feeOracle.estimate(side);
+  }
+
+  _classifyBuySubmission(order, { slippagePct, exactReserveFence }) {
+    const submitMode = this.buySubmitMode === 'jito_bundle_only'
+      ? 'jito_bundle_only'
+      : 'race';
+
+    let feeMode = 'normal';
+    let reason = 'normal';
+
+    if (this.buySignalFeeTiering) {
+      const reserveSource = order?.exactReserveSource || 'none';
+      const strictExact = exactReserveFence && reserveSource === 'tx_post_balances';
+      if (!strictExact || Number(slippagePct) > 1) {
+        feeMode = 'low_confidence';
+        reason = `low_confidence:${reserveSource},slip=${slippagePct}`;
+      } else {
+        reason = `high_confidence:${reserveSource},slip=${slippagePct}`;
+      }
+    }
+
+    return { submitMode, feeMode, reason };
   }
 
   /**
@@ -1216,7 +1353,14 @@ class Executor {
 
       // 3. 构造、签名、提交
       // v3.32: 传入 baseTokenProgram 支持 Token-2022 币
-      const { serialized, feeInfo } = await this._buildAndSignTx(swapIxs, 'BUY', order.mint, swapState.baseTokenProgram);
+      const submitPlan = this._classifyBuySubmission(order, { slippagePct, exactReserveFence });
+      const { serialized, feeInfo } = await this._buildAndSignTx(
+        swapIxs,
+        'BUY',
+        order.mint,
+        swapState.baseTokenProgram,
+        submitPlan,
+      );
 
       // v3.17.14: 从已签名 tx 提取真实链上 signature
       // Slipstream 等中继返回的 sig 可能是内部 ID，不是链上真实 sig
@@ -1226,7 +1370,7 @@ class Executor {
       const realSig = bs58.encode(serialized.slice(1, 65));
 
       const tSend0 = Date.now();
-      await this._submitTx(serialized, 'BUY');
+      await this._submitTx(serialized, 'BUY', submitPlan);
       const sendLatencyMs = Date.now() - tSend0;
       monitor.inc('Executor.buySuccess', 1, 'Executor');
 
@@ -1235,7 +1379,8 @@ class Executor {
         `[Executor:LIVE] BUY submitted: ${(sig || '').slice(0, 8)}.. ` +
           `(state=${stateLatencyMs}ms[${stateSource}] build=${buildLatencyMs}ms send=${sendLatencyMs}ms total=${
             Date.now() - t0
-          }ms, reserve=${order.exactReserveSource || 'none'} slip=${slippagePct}% fee=${feeInfo.totalLamports}L ${feeInfo.source})`,
+          }ms, reserve=${order.exactReserveSource || 'none'} slip=${slippagePct}% ` +
+          `fee=${feeInfo.totalLamports}L ${feeInfo.source} submit=${submitPlan.submitMode}/${submitPlan.reason})`,
       );
 
       return {
@@ -1249,6 +1394,7 @@ class Executor {
         buildLatencyMs,
         priorityFeeLamports: feeInfo.totalLamports,
         priorityFeeSource: feeInfo.source,
+        submitMode: submitPlan.submitMode,
         sendLatencyMs,
         exactReserveFence,
         exactReserveSource: order.exactReserveSource || null,
