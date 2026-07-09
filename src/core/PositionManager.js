@@ -118,6 +118,15 @@ class PositionManager extends EventEmitter {
     return pids != null && pids.size > 0;
   }
 
+  _isPendingBundleOnlyBuy(pos) {
+    return !!(
+      pos &&
+      pos.buySubmitMode === 'jito_bundle_only' &&
+      !pos.reconciled &&
+      !pos.dryRun
+    );
+  }
+
   // v3.17.40b: 加仓策略 — 自最近一笔买入价跌15%以上才允许加仓
   //   首仓后：当前价 < 首仓entryPrice * 0.85 → 允许第1次加仓
   //   第1次加仓后：当前价 < 加仓entryPrice * 0.85 → 允许第2次加仓
@@ -584,14 +593,18 @@ class PositionManager extends EventEmitter {
           const feeSol = p.buySubmitMode === 'jito_bundle_only'
             ? 0
             : ((p.buyFeeLamports || 0) + 5000) / 1e9;
+          const timeoutExitReason = p.buySubmitMode === 'jito_bundle_only'
+            ? 'BUY_NOT_LANDED'
+            : 'BUY_RECONCILE_TIMEOUT';
+          const timeoutPnlPct = feeSol > 0 ? -100 : 0;
           try {
             this.tradeLogger.closePosition(pid, {
               closedAt: Date.now(),
               exitPrice: p.entryPrice,
               exitSol: 0,
               pnlSol: -feeSol,
-              pnlPct: -100,
-              exitReason: 'BUY_RECONCILE_TIMEOUT',
+              pnlPct: timeoutPnlPct,
+              exitReason: timeoutExitReason,
               sellSignature: null,
             });
           } catch (err) {
@@ -928,6 +941,7 @@ class PositionManager extends EventEmitter {
 
     for (const pos of this.positions.values()) {
       if (pos.exiting) continue;
+      if (this._isPendingBundleOnlyBuy(pos)) continue;
 
       // v3.17.11: SLOT_EXIT — 买入后 N 个 slot 全部卖出
       // 优先级最高，不受 reconciled/stabilizing 限制
@@ -1389,6 +1403,7 @@ class PositionManager extends EventEmitter {
 
     // v3.26: stuck 仓位不再触发退出逻辑（pool已死，卖出会循环失败）
     if (pos.status === 'stuck') return;
+    if (this._isPendingBundleOnlyBuy(pos)) return;
 
     // v3.20: 获取此仓位的买入前波动率
     const preVol5m = pos.preVol5m;
@@ -2025,6 +2040,17 @@ class PositionManager extends EventEmitter {
    */
   async _exit(pos, exitPrice, reason) {
     if (pos.exiting) return;
+    if (this._isPendingBundleOnlyBuy(pos)) {
+      monitor.inc('PositionManager.skippedExitPendingBundleOnlyBuy', 1, 'PositionManager');
+      if (!pos._loggedPendingBundleOnlyExitSkip) {
+        pos._loggedPendingBundleOnlyExitSkip = true;
+        console.warn(
+          `[PositionManager] ⏳ skip exit ${pos.symbol || pos.mint.slice(0, 6)} reason=${reason}: ` +
+          `Jito bundleOnly BUY not confirmed yet`,
+        );
+      }
+      return;
+    }
     pos.exiting = true;
     pos.exitReason = reason;
 
