@@ -698,13 +698,16 @@ class PositionManager extends EventEmitter {
         }
       }
 
-      // v3.26: BUY_CHAIN_FAILED → 24h 冷却，防止同币反复买入失败
+      // v3.33: BUY_CHAIN_FAILED rebuy cooldown is optional. Default disabled
+      // for strict first-buy chasing; set BUY_FAILED_REBUY_COOLDOWN_MS > 0 to enable.
       if (this.signalEngine && this.signalEngine._exitCooldowns) {
-        const buyFailedCooldownMs = parseInt(process.env.BUY_FAILED_REBUY_COOLDOWN_MS || '86400000', 10);
-        this.signalEngine._exitCooldowns.set(mint, Date.now() + buyFailedCooldownMs);
-        console.log(
-          `[PositionManager] 🔒 BUY_CHAIN_FAILED cooldown ${symbol || mint.slice(0, 6)} for ${Math.round(buyFailedCooldownMs / 3600000)}h (no rebuy)`,
-        );
+        const buyFailedCooldownMs = parseInt(process.env.BUY_FAILED_REBUY_COOLDOWN_MS || '0', 10);
+        if (buyFailedCooldownMs > 0) {
+          this.signalEngine._exitCooldowns.set(mint, Date.now() + buyFailedCooldownMs);
+          console.log(
+            `[PositionManager] 🔒 BUY_CHAIN_FAILED cooldown ${symbol || mint.slice(0, 6)} for ${Math.round(buyFailedCooldownMs / 3600000)}h (no rebuy)`,
+          );
+        }
       }
       // v3.17.42: 广播关闭事件给前端，否则前端不知道仓位已关闭
       this.emit('closed', {

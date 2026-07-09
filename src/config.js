@@ -131,10 +131,10 @@ const config = {
     buySlippageBps: parseInt(process.env.BUY_SLIPPAGE_BPS || '1500', 10),  // 15%
     sellSlippageBps: parseInt(process.env.SELL_SLIPPAGE_BPS || '2000', 10), // 20%
     // 严格首买模式：用触发砸单 tx 的精确 post-token-balances 重算报价，
-    // 并用 FIRST_BUY_SLIPPAGE_BPS 控制首买容差（默认 0）。若精确储备缺失则跳过；若仅 pool metadata cache miss，
+    // 并用 FIRST_BUY_SLIPPAGE_BPS 控制首买容差（默认 100bps=1%）。若精确储备缺失则跳过；若仅 pool metadata cache miss，
     // Executor 会走一次同步 RPC fallback，再用精确储备覆盖，cache hit 热路径不补 RPC。
     firstBuyOnly: (process.env.FIRST_BUY_ONLY ?? 'true').toLowerCase() === 'true',
-    firstBuySlippageBps: parseInt(process.env.FIRST_BUY_SLIPPAGE_BPS || '0', 10),
+    firstBuySlippageBps: parseInt(process.env.FIRST_BUY_SLIPPAGE_BPS || '100', 10),
 
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),

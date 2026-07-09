@@ -175,7 +175,7 @@ class Executor {
     // bundleOnly=true gives revert protection at the submitter layer: if the
     // transaction cannot be included successfully, Jito should not forward it
     // as a normal public transaction. No simulation is added to the hot path.
-    this.buySubmitMode = (process.env.BUY_SUBMIT_MODE || 'race').toLowerCase();
+    this.buySubmitMode = (process.env.BUY_SUBMIT_MODE || 'jito_bundle_only').toLowerCase();
     this.buySignalFeeTiering = (process.env.BUY_SIGNAL_FEE_TIERING ?? 'false').toLowerCase() === 'true';
     this.lowConfidenceBuyFeeLamports = parseInt(process.env.LOW_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS || '300000', 10);
     this.jitoBlockEngineUrl = (process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf').replace(/\/+$/, '');
@@ -1262,8 +1262,8 @@ class Executor {
       }
 
       // 严格首买模式只做内存替换：使用砸单 tx 的精确 post-token-balances
-      // 覆盖缓存中的旧储备，并用 FIRST_BUY_SLIPPAGE_BPS 控制容差（默认 0）。
-      // 默认 0 时，若前面已有买单令价格变差，PumpSwap 会在链上拒绝该交易。
+      // 覆盖缓存中的旧储备，并用 FIRST_BUY_SLIPPAGE_BPS 控制容差（默认 1%）。
+      // 默认 1% 时，若前面已有买单令价格变差超过容差，PumpSwap 会在链上拒绝该交易。
       let slippagePct;
       let exactReserveFence = false;
       try {
