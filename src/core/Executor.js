@@ -1399,7 +1399,8 @@ class Executor {
         exactReserveFence,
         exactReserveSource: order.exactReserveSource || null,
         slippagePct,
-        buySlot: this._latestBuySlot || null,  // 提交时的链上 slot
+        buySlot: null,                         // real landing slot is filled by confirmTx/reconcile
+        submittedSlot: this._latestBuySlot || null, // pre-submit slot, only for temporary SLOT_EXIT anchoring
       };
     } catch (err) {
       monitor.inc('Executor.buyFail', 1, 'Executor');

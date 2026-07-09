@@ -306,6 +306,8 @@ class PositionManager extends EventEmitter {
         dryRun: !!row.dry_run,
         buySignature: row.buy_signature,
         buySlot: row.buy_slot || 0,  // v3.17.11: 恢复时可能没有 buySlot
+        buySubmitSlot: 0,
+        slotExitStartSlot: row.buy_slot || 0,
         dumpSlot: row.dump_slot || 0, // v3.17.19: 恢复时可能没有 dumpSlot
         exiting: false,
         sellAttempts: row.sell_attempts || 0,
@@ -402,7 +404,7 @@ class PositionManager extends EventEmitter {
    * @param {string} p.signature
    * @param {number} [p.buyFeeLamports] - BUY tx 的 priority fee + base fee (lamports)
    */
-  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySubmitMode = null, buySlot, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
+  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySubmitMode = null, buySlot, buySubmitSlot = 0, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
     const pid = positionId || crypto.randomUUID();
     const pos = {
       positionId: pid,
@@ -417,7 +419,9 @@ class PositionManager extends EventEmitter {
       buyFeeLamports: buyFeeLamports || 0,  // v3.4: 真实成本
       buySubmitMode: buySubmitMode || null,
       sellFeeLamports: 0,                    // 卖出时累加（包括所有重试的 fee）
-      buySlot: buySlot || 0,                // v3.17.11: BUY 时的链上 slot
+      buySlot: buySlot || 0,                // real BUY landing slot; filled by reconcile
+      buySubmitSlot: buySubmitSlot || 0,    // pre-submit slot; never persisted as real buy_slot
+      slotExitStartSlot: buySlot || buySubmitSlot || 0, // fast SLOT_EXIT anchor before reconcile
       dumpSlot: dumpSlot || 0,              // v3.17.19: 砸单的链上 slot (用于计算 BUY 落链领先几个 slot)
       exiting: false,
       sellAttempts: 0,
@@ -498,10 +502,16 @@ class PositionManager extends EventEmitter {
       console.error(`[PositionManager] ❌ openPosition DB write FAILED for ${symbol || mint.slice(0,6)}: ${dbErr.message}`);
     }
 
-    // v3.17.19: log slot lag (砸单 → BUY 落链相差几个 slot, 0 = 同 slot 抢入)
-    // ⚠️ 注意：此时 buySlot 是提交前的 latestSlot，不是真实落链 slot
-    //    真实 lag 在 _reconcileBuyAsync 完成后打印
-    if (pos.dumpSlot > 0 && pos.buySlot > 0) {
+    // v3.33: at OPEN time we only know the pre-submit slot. Do not log or
+    // persist it as real buy_slot; real lag is printed after reconcile.
+    if (pos.dumpSlot > 0 && pos.slotExitStartSlot > 0 && pos.buySlot <= 0) {
+      const submitLag = pos.slotExitStartSlot - pos.dumpSlot;
+      console.log(
+        `[PositionManager] 📈 OPEN ${symbol || mint.slice(0, 6)} @ ${entryPrice.toExponential(4)}, ` +
+          `${tokenAmount.toFixed(2)} tokens, ${entrySol.toFixed(4)} SOL ` +
+          `(dump_slot=${pos.dumpSlot}, submit_slot=${pos.slotExitStartSlot}, submit_gap=${submitLag} slot; real buy_slot pending)`,
+      );
+    } else if (pos.dumpSlot > 0 && pos.buySlot > 0) {
       const slotLag = pos.buySlot - pos.dumpSlot;
       console.log(
         `[PositionManager] 📈 OPEN ${symbol || mint.slice(0, 6)} @ ${entryPrice.toExponential(4)}, ` +
@@ -851,11 +861,16 @@ class PositionManager extends EventEmitter {
     //    实际 BUY tx 落链通常晚 1-2 slot，result.slot 才是真实值
     if (result.slot && result.slot > 0) {
       pos.buySlot = result.slot;
+      pos.slotExitStartSlot = result.slot;
       const realLag = result.slot - pos.dumpSlot;
       console.log(
         `[PositionManager] 🔧 buySlot corrected: ${pos.symbol || mint.slice(0, 6)} ` +
           `dump_slot=${pos.dumpSlot} buy_slot=${result.slot} lag=${realLag} slot${realLag <= 1 ? ' ⚡' : ''}`,
       );
+      if (realLag < 0 && (process.env.EXIT_NEGATIVE_SLOT_LAG ?? 'true').toLowerCase() === 'true') {
+        pos._negativeSlotLag = realLag;
+        monitor.inc('PositionManager.negativeSlotLag', 1, 'PositionManager');
+      }
     }
 
     // 同步到 DB
@@ -875,6 +890,16 @@ class PositionManager extends EventEmitter {
         `tokens ${oldTokenAmount.toFixed(2)}→${realTokenReceived.toFixed(2)}, ` +
         `entryPrice ${oldEntryPrice.toExponential(4)}→${pos.entryPrice.toExponential(4)}`,
     );
+
+    if (pos._negativeSlotLag != null) {
+      const lastPrice = this.priceTracker.getPrice(pos.mint) || pos.entryPrice;
+      console.warn(
+        `[PositionManager] ⚠️ NEGATIVE_SLOT_LAG ${pos.symbol || mint.slice(0, 6)}: ` +
+          `real lag=${pos._negativeSlotLag}; immediate exit`,
+      );
+      this._exit(pos, lastPrice, 'NEGATIVE_SLOT_LAG');
+      return;
+    }
 
     // v3.9: 监控真实 CU 消耗，逼近 limit 时告警
     const cuConsumed = swap.computeUnitsConsumed || 0;
@@ -904,13 +929,14 @@ class PositionManager extends EventEmitter {
       // v3.17.11: SLOT_EXIT — 买入后 N 个 slot 全部卖出
       // 优先级最高，不受 reconciled/stabilizing 限制
       const slotExitGap = config.strategy.slotExitGap;
-      if (slotExitGap > 0 && pos.buySlot > 0 && currentSlot > 0) {
-        const slotsSinceBuy = currentSlot - pos.buySlot;
+      const slotExitAnchor = pos.buySlot || pos.slotExitStartSlot || 0;
+      if (slotExitGap > 0 && slotExitAnchor > 0 && currentSlot > 0) {
+        const slotsSinceBuy = currentSlot - slotExitAnchor;
         if (slotsSinceBuy >= slotExitGap) {
           const lastPrice = this.priceTracker.getPrice(pos.mint) || pos.entryPrice;
           console.log(
             `[PositionManager] ⚡ SLOT_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
-              `buySlot=${pos.buySlot} currentSlot=${currentSlot} gap=${slotsSinceBuy} (>=${slotExitGap})`,
+              `anchorSlot=${slotExitAnchor} realBuySlot=${pos.buySlot || 0} currentSlot=${currentSlot} gap=${slotsSinceBuy} (>=${slotExitGap})`,
           );
           this._exit(pos, lastPrice, 'SLOT_EXIT');
           continue;
@@ -1400,12 +1426,13 @@ class PositionManager extends EventEmitter {
     // v3.17.11: SLOT_EXIT — 最高优先级，不受 reconciled/stabilizing 限制
     const slotExitGap = config.strategy.slotExitGap;
     const currentSlot = this.tickStream ? this.tickStream.latestSlot : 0;
-    if (slotExitGap > 0 && pos.buySlot > 0 && currentSlot > 0) {
-      const slotsSinceBuy = currentSlot - pos.buySlot;
+    const slotExitAnchor = pos.buySlot || pos.slotExitStartSlot || 0;
+    if (slotExitGap > 0 && slotExitAnchor > 0 && currentSlot > 0) {
+      const slotsSinceBuy = currentSlot - slotExitAnchor;
       if (slotsSinceBuy >= slotExitGap) {
         console.log(
           `[PositionManager] ⚡ SLOT_EXIT ${pos.symbol || pos.mint.slice(0, 6)} ` +
-            `buySlot=${pos.buySlot} currentSlot=${currentSlot} gap=${slotsSinceBuy} (>=${slotExitGap})`,
+            `anchorSlot=${slotExitAnchor} realBuySlot=${pos.buySlot || 0} currentSlot=${currentSlot} gap=${slotsSinceBuy} (>=${slotExitGap})`,
         );
         this._exit(pos, price, 'SLOT_EXIT');
         return;
