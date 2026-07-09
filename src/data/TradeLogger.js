@@ -92,7 +92,13 @@ class TradeLogger {
         last_retry_at INTEGER,
         last_error TEXT,
         pending_sell_signature TEXT,
-        stuck_reason TEXT
+        stuck_reason TEXT,
+        peak_pnl_pct REAL,
+        peak_price REAL,
+        peak_ts INTEGER,
+        time_to_peak_ms INTEGER,
+        price_tick_count INTEGER DEFAULT 0,
+        pre_vol_5m_pct REAL
       );
       CREATE INDEX IF NOT EXISTS idx_positions_opened ON positions(opened_at);
       CREATE INDEX IF NOT EXISTS idx_positions_status ON positions(status);
@@ -167,6 +173,28 @@ class TradeLogger {
     } catch (_) { /* column already exists */ }
     try {
       this.db.exec('ALTER TABLE positions ADD COLUMN is_addon INTEGER DEFAULT 0');
+    } catch (_) { /* column already exists */ }
+
+    // v3.17.42+: columns used by PositionManager/DailyReport after older DBs
+    // were already created. Keep explicit migrations so git pull does not
+    // require manual ALTER TABLE fixes on the server.
+    try {
+      this.db.exec('ALTER TABLE positions ADD COLUMN peak_pnl_pct REAL');
+    } catch (_) { /* column already exists */ }
+    try {
+      this.db.exec('ALTER TABLE positions ADD COLUMN peak_price REAL');
+    } catch (_) { /* column already exists */ }
+    try {
+      this.db.exec('ALTER TABLE positions ADD COLUMN peak_ts INTEGER');
+    } catch (_) { /* column already exists */ }
+    try {
+      this.db.exec('ALTER TABLE positions ADD COLUMN time_to_peak_ms INTEGER');
+    } catch (_) { /* column already exists */ }
+    try {
+      this.db.exec('ALTER TABLE positions ADD COLUMN price_tick_count INTEGER DEFAULT 0');
+    } catch (_) { /* column already exists */ }
+    try {
+      this.db.exec('ALTER TABLE positions ADD COLUMN pre_vol_5m_pct REAL');
     } catch (_) { /* column already exists */ }
   }
 
