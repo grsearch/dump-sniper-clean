@@ -3,6 +3,7 @@
 const EventEmitter = require('events');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
+const { hasVerifiedExactReserves } = require('../utils/firstBuyOnly');
 
 const monitor = getMonitor();
 // SignalEngine 只在收到 dump 信号时 beat，没信号时不会心跳。砸盘信号本来就稀疏，
@@ -722,6 +723,21 @@ class SignalEngine extends EventEmitter {
     }
 
     // ============ 通过 → 触发买入 ============
+    // Strict first-buy reserve gate.
+    // "BUY_SIGNAL accepted" must mean the order will actually enter the BUY path.
+    // If firstBuyOnly rejection happens later inside Executor, the dashboard looks
+    // like it accepted a signal but never bought. Reject it here instead.
+    if (config.strategy.firstBuyOnly && !hasVerifiedExactReserves(signal)) {
+      const source = signal.exactReserveSource || 'none';
+      const baseRaw = signal.poolBaseAfterRaw ? 'yes' : 'no';
+      const quoteRaw = signal.poolQuoteAfterRaw ? 'yes' : 'no';
+      this._logReject(
+        signal,
+        `first_buy_only: exact reserves not verified (source=${source}, baseRaw=${baseRaw}, quoteRaw=${quoteRaw})`,
+      );
+      return;
+    }
+
     monitor.inc('SignalEngine.signalsAccepted', 1, 'SignalEngine');
     this.inflightBuys.add(mint);  // v3.23: 在emit前就标记，防并发同币双买
     this.lastTriggerTs.set(mint, Date.now());

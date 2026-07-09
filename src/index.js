@@ -728,6 +728,25 @@ async function main() {
     });
 
     if (!buyResult.success) {
+      try {
+        tradeLogger.logSignal({
+          ts: Date.now(),
+          mint: order.mint,
+          symbol: order.symbol,
+          kind: 'BUY_REJECTED',
+          sellSol: order.sellSol,
+          priceImpactPct: order.priceImpactPct,
+          seller: order.seller,
+          sellerTx: order.signature,
+          notes:
+            `executor rejected; reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'}, ` +
+            `slip=${buyResult.slippagePct ?? 'n/a'}, exact=${buyResult.exactReserveFence ?? false}`,
+          accepted: false,
+          rejectReason: buyResult.error || 'BUY failed',
+        });
+      } catch (err) {
+        monitor.recordError('main', err, { phase: 'log_buy_rejected_signal' });
+      }
       console.error(
         `[main] BUY failed for ${order.symbol || order.mint.slice(0, 6)}: ${buyResult.error} ` +
         `(reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'} ` +

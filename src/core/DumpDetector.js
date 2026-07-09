@@ -735,7 +735,7 @@ class DumpDetector extends EventEmitter {
     const poolQuoteAfterRaw = this._findRawBalance(postBalances, quoteVaultIdx, WSOL_MINT);
     const exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
       ? 'tx_post_balances'
-      : null;
+      : (poolBaseAfterRaw ? 'tx_post_balances_base_only' : null);
 
     if (
       baseBefore === null || baseAfter === null ||
@@ -828,7 +828,7 @@ class DumpDetector extends EventEmitter {
       : null;
     const exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
       ? 'tx_post_balances'
-      : null;
+      : (poolBaseAfterRaw ? 'tx_post_balances_base_only' : null);
 
     if (baseBefore === null || baseAfter === null) {
       monitor.inc('DumpDetector.cpiVaultBalanceMissing', 1, 'DumpDetector');
@@ -1182,6 +1182,7 @@ class DumpDetector extends EventEmitter {
 
     const tokensSold = bestTokensSold;
     const side = 'SELL';
+    let exactReserveSource = null;
 
     // 3. 算 quoteAmount
     let quoteAmount = 0;
@@ -1220,6 +1221,7 @@ class DumpDetector extends EventEmitter {
         priceAfter = qAfter / bAfter;
         priceChangePct = ((priceAfter - priceBefore) / priceBefore) * 100;
         poolQuoteAfter = qAfter;
+        exactReserveSource = 'cache_estimate';
       }
     }
 
@@ -1276,7 +1278,7 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: poolQuoteVault || null,
       poolQuoteAfter,
       poolBaseAfter: 0,
-      exactReserveSource: null,
+      exactReserveSource,
       source: 'balance_only',
     };
   }
