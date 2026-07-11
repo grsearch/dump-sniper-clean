@@ -1262,7 +1262,7 @@ class Executor {
       }
 
       // 严格首买模式只做内存替换：使用砸单 tx 的精确 post-token-balances
-      // 覆盖缓存中的旧储备，并用 FIRST_BUY_SLIPPAGE_BPS 控制容差（默认 1%）。
+      // 覆盖缓存中的旧储备，并用 FIRST_BUY_SLIPPAGE_BPS 控制容差（默认 2%）。
       // 默认 1% 时，若前面已有买单令价格变差超过容差，PumpSwap 会在链上拒绝该交易。
       let slippagePct;
       let exactReserveFence = false;
