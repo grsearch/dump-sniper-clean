@@ -198,10 +198,10 @@ class DumpDetector extends EventEmitter {
       if (parsed.side !== 'SELL') return;
 
       // ============ v3.26b: Aggregator 拆单校准（简化版，不依赖 poolState） ============
-      // 根因: DFlow/Jupiter 等 Aggregator 把大额卖出拆成 Pump AMM + Meteora DLMM 等
-      //   _parseFullVault/_parseCpiFallback 只看 Pump vault 变化，漏掉其他 DEX 部分
-      //   但卖家钱包的 baseMint 余额减少量 = 全部卖出（跨所有 DEX）
-      //   修复: 对比卖家 baseMint 总减少 vs vault 收到的量，差额用 priceBefore 估算 SOL
+      // DFlow/Jupiter 等 Aggregator 可能把大额卖出拆成 Pump AMM + Meteora/DLMM 等。
+      // 卖家钱包 baseMint 减少量会包含跨 DEX 的总卖出，但“针尖买入”只能按当前
+      // Pump 池真实 vault 变化判断；否则会把别的 DEX 成交误算成 Pump 池跌幅。
+      // 因此这里仅记录拆单诊断，不再放大 parsed.quoteAmount / priceChangePct。
       {
         const _txMeta = txMessage?.transaction?.meta || txMessage?.meta;
         const _preBal = _txMeta?.preTokenBalances || [];
@@ -217,19 +217,28 @@ class DumpDetector extends EventEmitter {
           const totalSellSol = parsed.quoteAmount + extraSol;
           // 安全限制: 校准后 sellSol 不超过原来的 3 倍, 不超过池子 SOL 的一半
           const maxSellSol = Math.min(parsed.quoteAmount * 3, (parsed.poolQuoteAfter || 100) * 0.5);
-          if (totalSellSol > parsed.quoteAmount * 1.05 && totalSellSol <= maxSellSol) {
-            const oldSellSol = parsed.quoteAmount;
-            const oldImpact = -parsed.priceChangePct;
-            parsed.quoteAmount = totalSellSol;
-            // 重算 impact: 简化用 sellSol 比例放大,但上限 maxPriceImpactPct
-            const newImpact = oldImpact * (totalSellSol / oldSellSol);
+          if (parsed.quoteAmount > 0 && totalSellSol > parsed.quoteAmount * 1.05 && totalSellSol <= maxSellSol) {
+            const pumpSellSol = parsed.quoteAmount;
+            const pumpImpact = -parsed.priceChangePct;
+            const estimatedTotalImpact = pumpImpact * (totalSellSol / pumpSellSol);
             const maxImpact = config.strategy.maxPriceImpactPct || 30;
-            parsed.priceChangePct = -Math.min(newImpact, maxImpact);
-            monitor.inc('DumpDetector.aggCalibration', 1, 'DumpDetector');
+            parsed.aggSplitEstimate = {
+              pumpSellSol,
+              pumpImpactPct: pumpImpact,
+              estimatedTotalSellSol: totalSellSol,
+              estimatedTotalImpactPct: estimatedTotalImpact,
+              sellerBaseDelta,
+              vaultBaseDelta,
+            };
+            monitor.inc('DumpDetector.aggSplitDetected', 1, 'DumpDetector');
+            if (estimatedTotalImpact > maxImpact) {
+              monitor.inc('DumpDetector.aggSplitWouldExceedMax', 1, 'DumpDetector');
+            }
             console.log(
-              `[DumpDetector] 🔀 AggCalib: ${parsed.symbol || parsed.baseMint.slice(0, 6)} ` +
-              `sellSol ${oldSellSol.toFixed(1)} → ${totalSellSol.toFixed(1)} SOL ` +
-              `impact ${oldImpact.toFixed(1)}% → ${Math.min(newImpact, maxImpact).toFixed(1)}% ` +
+              `[DumpDetector] 🔀 AggSplit: ${parsed.symbol || parsed.baseMint.slice(0, 6)} ` +
+              `pumpSell=${pumpSellSol.toFixed(1)} SOL pumpImpact=${pumpImpact.toFixed(1)}% ` +
+              `estTotalSell=${totalSellSol.toFixed(1)} SOL estImpact=${estimatedTotalImpact.toFixed(1)}% ` +
+              `(ignored for trigger; max=${maxImpact}%) ` +
               `(sellerBase=${sellerBaseDelta.toFixed(0)} vaultBase=${vaultBaseDelta.toFixed(0)} ratio=${(sellerBaseDelta/vaultBaseDelta).toFixed(1)}x)`,
             );
           }
@@ -263,19 +272,8 @@ class DumpDetector extends EventEmitter {
           }
         }
       }
-      // v3.27: 新币允许更低的impact(竞对 impact<5% 94.4%胜率赚331 SOL)
-      const newCoinMinImpact = parseFloat(process.env.NEW_COIN_MIN_IMPACT_PCT || '0');
-      let effectiveMinImpact = config.strategy.minPriceImpactPct;
-      if (newCoinMinImpact >= 0 && newCoinMinImpact < effectiveMinImpact && parsed.baseMint) {
-        const _ti = this.tokenRegistry?.getToken(parsed.baseMint);
-        if (_ti && _ti.added_at) {
-          const _age = Date.now() - _ti.added_at;
-          const _threshold = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
-          if (_age < _threshold) {
-            effectiveMinImpact = newCoinMinImpact;
-          }
-        }
-      }
+      // 统一标准：不再给新币降低 impact 门槛，所有币都按 MIN_PRICE_IMPACT_PCT 判断。
+      const effectiveMinImpact = config.strategy.minPriceImpactPct;
       const passImpact = priceImpactPct >= effectiveMinImpact
                       && priceImpactPct <= config.strategy.maxPriceImpactPct;
       const passLiquidity = effectivePoolQuoteSol >= config.strategy.minPoolQuoteSol;
@@ -480,17 +478,8 @@ class DumpDetector extends EventEmitter {
 
     // 过滤
     const passSize = totalSellSol >= config.strategy.minSellSol;
-    // v3.27: 新币允许更低的impact
-    const newCoinMinImpact = parseFloat(process.env.NEW_COIN_MIN_IMPACT_PCT || '0');
-    let effectiveAggMinImpact = config.strategy.minPriceImpactPct;
-    if (newCoinMinImpact >= 0 && newCoinMinImpact < effectiveAggMinImpact) {
-      const aggTokenInfo = this.tokenRegistry?.getToken(lastSell.mint);
-      const aggTokenAgeMs = Date.now() - (aggTokenInfo?.added_at || 0);
-      const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
-      if (aggTokenInfo && aggTokenInfo.added_at && aggTokenAgeMs < newCoinThresholdMs) {
-        effectiveAggMinImpact = newCoinMinImpact;
-      }
-    }
+    // 聚合信号也统一标准：不再给新币降低 impact 门槛。
+    const effectiveAggMinImpact = config.strategy.minPriceImpactPct;
     const passImpact = cumulativeImpactPct >= effectiveAggMinImpact
                     && cumulativeImpactPct <= config.strategy.maxPriceImpactPct;
     // v3.27-fix: 同单笔路径的修复，Pump.fun解析值偏低用tokenRegistry

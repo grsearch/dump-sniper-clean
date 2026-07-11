@@ -645,6 +645,38 @@ async function main() {
     const tokenInfo = tokenRegistry.getToken(order.mint);
     const _t1 = Date.now();
 
+    // Final pre-submit freshness guard. SignalEngine checks the same rule, but
+    // the slot can advance between emit and actual BUY submission.
+    const submitSlot = tickStream.latestSlot || 0;
+    const maxBuySubmitSlotGap = config.strategy.maxBuySubmitSlotGap;
+    if (maxBuySubmitSlotGap >= 0 && order.slot && submitSlot) {
+      const submitGap = submitSlot - order.slot;
+      if (submitGap > maxBuySubmitSlotGap) {
+        const reason =
+          `buy submit slot gap too large: dump@${order.slot}, submit@${submitSlot}, gap=${submitGap} (>${maxBuySubmitSlotGap})`;
+        console.warn(`[main] BUY rejected ${order.symbol || order.mint.slice(0, 6)}: ${reason}`);
+        try {
+          tradeLogger.logSignal({
+            ts: Date.now(),
+            mint: order.mint,
+            symbol: order.symbol,
+            kind: 'BUY_REJECTED',
+            sellSol: order.sellSol,
+            priceImpactPct: order.priceImpactPct,
+            seller: order.seller,
+            sellerTx: order.signature,
+            notes: `pre-submit reject; ${reason}`,
+            accepted: false,
+            rejectReason: reason,
+          });
+        } catch (err) {
+          monitor.recordError('main', err, { phase: 'log_pre_submit_slot_gap_reject' });
+        }
+        signalEngine.markBuyDone(order.mint);
+        return;
+      }
+    }
+
     // 用同一个 positionId 贯穿 BUY trade / position 表
     const positionId = crypto.randomUUID();
 
@@ -652,7 +684,7 @@ async function main() {
     signalEngine.markBuyInflight(order.mint);
 
     // v3.17.11: BUY 前记录当前链上 slot，用于 SLOT_EXIT 策略
-    executor.setLatestSlot(tickStream.latestSlot || 0);
+    executor.setLatestSlot(submitSlot);
 
     // 普通模式保留旧的同步 cache-miss 刷新。
     // 严格首买模式绝不在热路径补 RPC：cache miss 会由 Executor 快速拒绝，

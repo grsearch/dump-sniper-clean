@@ -705,8 +705,9 @@ class SignalEngine extends EventEmitter {
       const oldCoinMinPoolSol = parseFloat(process.env.OLD_COIN_MIN_POOL_SOL || '100');
       if (oldCoinMinPoolSol > 0 && this.tokenRegistry) {
         const tokenInfo = this.tokenRegistry.getToken(mint);
-        if (tokenInfo && tokenInfo.added_at) {
-          const tokenAgeMs = Date.now() - tokenInfo.added_at;
+        const tokenBirthTs = tokenInfo?.creation_time || tokenInfo?.added_at;
+        if (tokenInfo && tokenBirthTs) {
+          const tokenAgeMs = Date.now() - tokenBirthTs;
           const newCoinThresholdMs = parseFloat(process.env.NEW_COIN_AGE_THRESHOLD_MS || '86400000');
           if (tokenAgeMs >= newCoinThresholdMs) {
             // 老币: pool 太小的不买
@@ -738,6 +739,19 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
+    // BUY submission freshness gate: if the dump is already old by local slot
+    // time, the needle has likely passed. Reject before BUY to avoid fees.
+    const latestSlot = this.tickStream ? (this.tickStream.latestSlot || 0) : 0;
+    const slotGap = (slot && latestSlot) ? (latestSlot - slot) : null;
+    const maxBuySubmitSlotGap = config.strategy.maxBuySubmitSlotGap;
+    if (maxBuySubmitSlotGap >= 0 && slotGap !== null && slotGap > maxBuySubmitSlotGap) {
+      this._logReject(
+        signal,
+        `buy submit slot gap too large: dump@${slot}, latestSlot@${latestSlot}, gap=${slotGap} (>${maxBuySubmitSlotGap})`,
+      );
+      return;
+    }
+
     monitor.inc('SignalEngine.signalsAccepted', 1, 'SignalEngine');
     this.inflightBuys.add(mint);  // v3.23: 在emit前就标记，防并发同币双买
     this.lastTriggerTs.set(mint, Date.now());
@@ -754,10 +768,6 @@ class SignalEngine extends EventEmitter {
       this.triggeredSellerMintPairs.set(key, Date.now() + config.strategy.sellerMintDedupMs);
       monitor.set('SignalEngine.sellerMintPairsTracked', this.triggeredSellerMintPairs.size, 'SignalEngine');
     }
-
-    // v3.17.7: 日志带上 slot 和 slot gap（用于事后分析延迟分布）
-    const latestSlot = this.tickStream ? (this.tickStream.latestSlot || 0) : 0;
-    const slotGap = (slot && latestSlot) ? (latestSlot - slot) : null;
 
     // v3.10: 先 emit buyOrder（让 Executor 立即开始工作），再异步写 DB
     // SQLite WAL 模式下写入也要 1-3ms，省下来给关键路径
