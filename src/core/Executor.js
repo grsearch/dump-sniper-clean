@@ -1021,6 +1021,34 @@ class Executor {
     return { submitMode, feeMode, reason };
   }
 
+  _resolveFirstBuySlippageBps(order) {
+    const baseBps = Number(config.strategy.firstBuySlippageBps) || 0;
+    if (!config.strategy.firstBuyOnly || !config.strategy.firstBuyDynamicSlippage) return baseBps;
+    if (order?.exactReserveSource !== 'tx_post_balances') return baseBps;
+
+    const lowCompetitionBps = Number(config.strategy.firstBuyLowCompetitionSlippageBps) || 0;
+    if (lowCompetitionBps <= baseBps) return baseBps;
+
+    const slotGap = Number.isFinite(order?._slotGap)
+      ? order._slotGap
+      : (order?.slot && order?.submitSlot ? order.submitSlot - order.slot : null);
+    const competition = order?._poolCompetition || null;
+    const noKnownCompetition =
+      competition &&
+      (competition.buyCount || 0) === 0 &&
+      (competition.buySol || 0) === 0 &&
+      (competition.maxSingleBuySol || 0) === 0;
+    const sellSol = Number(order?.sellSol) || 0;
+    const maxSellSol = Number(config.strategy.firstBuyLowCompetitionMaxSellSol);
+    const sellSizeOk = !Number.isFinite(maxSellSol) || maxSellSol <= 0 || sellSol <= maxSellSol;
+
+    if (slotGap === 0 && noKnownCompetition && sellSizeOk) {
+      monitor.inc('Executor.firstBuyDynamicSlippage', 1, 'Executor');
+      return lowCompetitionBps;
+    }
+    return baseBps;
+  }
+
   /**
    * 买入：SOL → token，固定 SOL 输入。
    */
@@ -1246,6 +1274,8 @@ class Executor {
           latencyMs: Date.now() - t0,
         };
       }
+
+      const referenceSwapState = swapState;
       // ============ v3.32: Dead pool 检查 — IncorrectProgramId 导致的已迁移pool ============
       if (this.poolStateCache && this.poolStateCache.isDead(order.poolAddress)) {
         monitor.inc('Executor.buyPoolDead', 1, 'Executor');
@@ -1263,16 +1293,29 @@ class Executor {
 
       // 严格首买模式只做内存替换：使用砸单 tx 的精确 post-token-balances
       // 覆盖缓存中的旧储备，并用 FIRST_BUY_SLIPPAGE_BPS 控制容差（默认 2%）。
-      // 默认 1% 时，若前面已有买单令价格变差超过容差，PumpSwap 会在链上拒绝该交易。
+      // 默认 2% 时，若前面已有买单令价格变差超过容差，PumpSwap 会在链上拒绝该交易。
       let slippagePct;
       let exactReserveFence = false;
       try {
+        if (config.strategy.firstBuyOnly && order?.exactReserveSource === 'tx_post_balances') {
+          const reserveCheck = this._validateExactReservesAgainstState(referenceSwapState, order);
+          if (!reserveCheck.ok) {
+            monitor.inc('Executor.firstBuyExactReserveMismatch', 1, 'Executor');
+            return {
+              success: false,
+              error: reserveCheck.reason,
+              firstBuyOnlyRejected: true,
+              exactReserveMismatch: true,
+              latencyMs: Date.now() - t0,
+            };
+          }
+        }
         const prepared = prepareBuyQuoteState({
           swapState,
           order,
           firstBuyOnly: config.strategy.firstBuyOnly,
           buySlippageBps: config.strategy.buySlippageBps,
-          firstBuySlippageBps: config.strategy.firstBuySlippageBps,
+          firstBuySlippageBps: this._resolveFirstBuySlippageBps(order),
         });
         swapState = prepared.swapState;
         slippagePct = prepared.slippagePct;
@@ -1350,6 +1393,31 @@ class Executor {
       const baseRaw = this._extractBaseAmount(buyResult, swapState, sizeLamportsBN, 'buy');
       const tokenAmount = Number(baseRaw) / Math.pow(10, baseDecimals);
       const realPrice = tokenAmount > 0 ? sizeSol / tokenAmount : 0;
+
+      if (exactReserveFence) {
+        const tinyFillCheck = this._validateBuyQuoteValue({
+          referenceSwapState,
+          tokenAmount,
+          sizeSol,
+          baseDecimals,
+          symbol: order.symbol,
+          mint: order.mint,
+        });
+        if (!tinyFillCheck.ok) {
+          monitor.inc('Executor.firstBuyTinyFillRejected', 1, 'Executor');
+          console.error(`[Executor:LIVE] 🚫 BUY ABORTED ${order.symbol || order.mint.slice(0, 6)}: ${tinyFillCheck.reason}`);
+          return {
+            success: false,
+            error: tinyFillCheck.reason,
+            firstBuyOnlyRejected: true,
+            tinyFillRejected: true,
+            latencyMs: Date.now() - t0,
+            exactReserveFence,
+            exactReserveSource: order.exactReserveSource || null,
+            slippagePct,
+          };
+        }
+      }
 
       // 3. 构造、签名、提交
       // v3.32: 传入 baseTokenProgram 支持 Token-2022 币
@@ -1670,6 +1738,74 @@ class Executor {
     if (Array.isArray(sdkResult.ixs)) return sdkResult.ixs;
     if (sdkResult.programId && sdkResult.keys) return [sdkResult];
     return null;
+  }
+
+  _rawDiffPct(rawA, rawB) {
+    try {
+      const a = BigInt(rawA.toString());
+      const b = BigInt(rawB.toString());
+      if (a <= 0n || b <= 0n) return null;
+      const max = a > b ? a : b;
+      const diff = a > b ? a - b : b - a;
+      return Number((diff * 1_000_000n) / max) / 10_000; // percent with 4 decimals
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _validateExactReservesAgainstState(referenceSwapState, order) {
+    const maxPct = Number(config.strategy.firstBuyReserveMismatchMaxPct);
+    if (!Number.isFinite(maxPct) || maxPct < 0) return { ok: true };
+    if (!referenceSwapState?.poolBaseAmount || !referenceSwapState?.poolQuoteAmount) return { ok: true };
+    if (!order?.poolBaseAfterRaw || !order?.poolQuoteAfterRaw) return { ok: true };
+
+    const baseDiffPct = this._rawDiffPct(order.poolBaseAfterRaw, referenceSwapState.poolBaseAmount);
+    const quoteDiffPct = this._rawDiffPct(order.poolQuoteAfterRaw, referenceSwapState.poolQuoteAmount);
+    const badBase = baseDiffPct != null && baseDiffPct > maxPct;
+    const badQuote = quoteDiffPct != null && quoteDiffPct > maxPct;
+    if (!badBase && !badQuote) return { ok: true };
+
+    const reason =
+      `first_buy_only: exact reserve mismatch vs pool state ` +
+      `(baseDiff=${baseDiffPct == null ? 'n/a' : baseDiffPct.toFixed(2)}%, ` +
+      `quoteDiff=${quoteDiffPct == null ? 'n/a' : quoteDiffPct.toFixed(2)}%, max=${maxPct}%)`;
+    console.error(`[Executor:LIVE] 🚫 BUY ABORTED ${order.symbol || order.mint?.slice?.(0, 6) || ''}: ${reason}`);
+    return { ok: false, reason };
+  }
+
+  _poolMidPriceFromState(state, baseDecimals) {
+    try {
+      if (!state?.poolBaseAmount || !state?.poolQuoteAmount) return 0;
+      const baseRaw = Number(state.poolBaseAmount.toString());
+      const quoteRaw = Number(state.poolQuoteAmount.toString());
+      if (!Number.isFinite(baseRaw) || !Number.isFinite(quoteRaw) || baseRaw <= 0 || quoteRaw <= 0) return 0;
+      return (quoteRaw / 1e9) / (baseRaw / Math.pow(10, baseDecimals));
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  _validateBuyQuoteValue({ referenceSwapState, tokenAmount, sizeSol, baseDecimals, symbol, mint }) {
+    const minRatio = Number(config.strategy.firstBuyMinQuoteValueRatio);
+    if (!Number.isFinite(minRatio) || minRatio <= 0) return { ok: true };
+    if (!Number.isFinite(tokenAmount) || tokenAmount <= 0 || !Number.isFinite(sizeSol) || sizeSol <= 0) {
+      return { ok: false, reason: 'first_buy_only: invalid SDK quote token amount' };
+    }
+
+    const midPrice = this._poolMidPriceFromState(referenceSwapState, baseDecimals);
+    if (!Number.isFinite(midPrice) || midPrice <= 0) return { ok: true };
+
+    const estimatedValueSol = tokenAmount * midPrice;
+    const ratio = estimatedValueSol / sizeSol;
+    if (ratio >= minRatio) return { ok: true };
+
+    return {
+      ok: false,
+      reason:
+        `first_buy_only: tiny fill quote rejected ` +
+        `(${symbol || mint?.slice?.(0, 6) || ''}: estimatedValue=${estimatedValueSol.toFixed(4)} SOL, ` +
+        `size=${sizeSol.toFixed(4)} SOL, ratio=${(ratio * 100).toFixed(1)}% < ${(minRatio * 100).toFixed(0)}%)`,
+    };
   }
 
   _extractBaseAmount(sdkResult, state, fallbackQuoteIn, side) {

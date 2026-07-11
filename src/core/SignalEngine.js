@@ -57,6 +57,10 @@ class SignalEngine extends EventEmitter {
     this.triggeredSellerMintPairs = new Map();
     // v3.24: 同币卖出后冷却 — 避免短时间重复买入同一币
     this._exitCooldowns = new Map(); // mint → cooldownExpireAt
+    this._exitCooldownReasons = new Map(); // mint -> human-readable cooldown reason
+    this._poolSlotBuys = new Map(); // `${poolAddress}:${slot}` -> same-slot BUY pressure
+    this._poolSlotBuyTtlMs = 60_000;
+    this._buy6004Failures = new Map(); // mint -> { count, firstTs }
 
     // v3.17.15: 同卖家短期累计卖出追踪
     //   同一卖家可能拆分多笔 tx 砸盘，每笔 < MIN_SELL_SOL 但合计 > MIN_SELL_SOL
@@ -127,6 +131,13 @@ class SignalEngine extends EventEmitter {
         cleaned += 1;
       }
     }
+    for (const [mint, expireAt] of this._exitCooldowns) {
+      if (expireAt <= now) {
+        this._exitCooldowns.delete(mint);
+        this._exitCooldownReasons.delete(mint);
+        cleaned += 1;
+      }
+    }
     // v3.17.15: 清理过期的卖家累计卖出
     for (const [key, sells] of this.sellerRecentSells) {
       const cutoff = Date.now() - 30_000;
@@ -135,6 +146,24 @@ class SignalEngine extends EventEmitter {
     }
     // v3.17.40: 清理过期价格采样
     this._cleanupLongPriceSamples();
+
+    const buyCutoff = Date.now() - this._poolSlotBuyTtlMs;
+    for (const [key, stats] of this._poolSlotBuys) {
+      if (!stats || stats.lastTs < buyCutoff) {
+        this._poolSlotBuys.delete(key);
+        cleaned += 1;
+      }
+    }
+    const failWindowMs = Number(config.strategy.buy6004FailureWindowMs);
+    if (Number.isFinite(failWindowMs) && failWindowMs > 0) {
+      const failCutoff = Date.now() - failWindowMs;
+      for (const [mint, stats] of this._buy6004Failures) {
+        if (!stats || stats.firstTs < failCutoff) {
+          this._buy6004Failures.delete(mint);
+          cleaned += 1;
+        }
+      }
+    }
 
     if (cleaned > 0) {
       monitor.set('SignalEngine.sellerTxsTracked', this.triggeredSellerTxs.size, 'SignalEngine');
@@ -157,6 +186,152 @@ class SignalEngine extends EventEmitter {
     if (!sig) return;
     this.ourSignatures.add(sig);
     setTimeout(() => this.ourSignatures.delete(sig), 5 * 60_000);
+  }
+
+  _poolSlotKey(poolAddress, slot) {
+    if (!poolAddress || !slot) return null;
+    return `${poolAddress}:${slot}`;
+  }
+
+  handleSwapParsed(swap) {
+    if (!swap || swap.side !== 'BUY' || !swap.poolAddress || !swap.slot) return;
+    const sol = Number(swap.solVolume) || 0;
+    const key = this._poolSlotKey(swap.poolAddress, swap.slot);
+    if (!key) return;
+
+    const now = Date.now();
+    const existing = this._poolSlotBuys.get(key) || {
+      poolAddress: swap.poolAddress,
+      slot: swap.slot,
+      buyCount: 0,
+      buySol: 0,
+      maxSingleBuySol: 0,
+      lastTs: 0,
+      buys: [],
+    };
+    existing.buyCount += 1;
+    existing.buySol += Math.max(0, sol);
+    existing.maxSingleBuySol = Math.max(existing.maxSingleBuySol || 0, sol);
+    existing.lastTs = now;
+    existing.buys.push({ sol: Math.max(0, sol), ts: now });
+    this._poolSlotBuys.set(key, existing);
+    monitor.set('SignalEngine.poolSlotBuyKeys', this._poolSlotBuys.size, 'SignalEngine');
+  }
+
+  getPoolCompetitionPressure(poolAddress, slot) {
+    const key = this._poolSlotKey(poolAddress, slot);
+    const stats = key ? this._poolSlotBuys.get(key) : null;
+    return {
+      poolAddress: poolAddress || null,
+      slot: slot || null,
+      buyCount: stats?.buyCount || 0,
+      buySol: stats?.buySol || 0,
+      maxSingleBuySol: stats?.maxSingleBuySol || 0,
+      lastTs: stats?.lastTs || 0,
+      buyEvents: stats?.buys ? stats.buys.slice() : [],
+    };
+  }
+
+  _diffCompetitionStats(current, baseline) {
+    if (!baseline) return current;
+    const baselineCount = Array.isArray(baseline.buyEvents) ? baseline.buyEvents.length : (baseline.buyCount || 0);
+    const events = Array.isArray(current.buyEvents) ? current.buyEvents.slice(baselineCount) : [];
+    const buySol = events.reduce((sum, item) => sum + (Number(item?.sol) || 0), 0);
+    const maxSingleBuySol = events.reduce((max, item) => Math.max(max, Number(item?.sol) || 0), 0);
+    return {
+      poolAddress: current.poolAddress,
+      slot: current.slot,
+      buyCount: events.length,
+      buySol,
+      maxSingleBuySol,
+      lastTs: current.lastTs || 0,
+      baselineBuyCount: baseline.buyCount || 0,
+      baselineBuySol: baseline.buySol || 0,
+      buyEvents: events,
+    };
+  }
+
+  checkPoolCompetition(signal) {
+    if (!config.strategy.firstBuyCompetitionFilter) return { ok: true, stats: null };
+    const current = this.getPoolCompetitionPressure(signal?.poolAddress, signal?.slot);
+    const stats = this._diffCompetitionStats(current, signal?._poolCompetitionBaseline);
+    if (!stats.poolAddress || !stats.slot) return { ok: true, stats };
+
+    const maxBuys = Number(config.strategy.firstBuyMaxCompetingBuys);
+    if (Number.isFinite(maxBuys) && maxBuys > 0 && stats.buyCount >= maxBuys) {
+      return {
+        ok: false,
+        stats,
+        reason:
+          `same-slot competition: buys=${stats.buyCount} >= ${maxBuys} ` +
+          `(pool=${stats.poolAddress.slice(0, 8)}.. slot=${stats.slot})`,
+      };
+    }
+
+    const maxSol = Number(config.strategy.firstBuyMaxCompetingSol);
+    if (Number.isFinite(maxSol) && maxSol > 0 && stats.buySol >= maxSol) {
+      return {
+        ok: false,
+        stats,
+        reason:
+          `same-slot competition: buySol=${stats.buySol.toFixed(3)} >= ${maxSol} ` +
+          `(buys=${stats.buyCount}, pool=${stats.poolAddress.slice(0, 8)}.. slot=${stats.slot})`,
+      };
+    }
+
+    const maxSingle = Number(config.strategy.firstBuyMaxSingleCompetingBuySol);
+    if (Number.isFinite(maxSingle) && maxSingle > 0 && stats.maxSingleBuySol >= maxSingle) {
+      return {
+        ok: false,
+        stats,
+        reason:
+          `same-slot competition: maxSingleBuy=${stats.maxSingleBuySol.toFixed(3)} >= ${maxSingle} ` +
+          `(buys=${stats.buyCount}, pool=${stats.poolAddress.slice(0, 8)}.. slot=${stats.slot})`,
+      };
+    }
+
+    return { ok: true, stats };
+  }
+
+  _isExceededSlippageError(error) {
+    const s = String(error || '').toLowerCase();
+    return s.includes('6004') || s.includes('exceededslippage') || s.includes('exceeded slippage');
+  }
+
+  recordBuyChainFailure(mint, symbol, error) {
+    if (!mint || !this._isExceededSlippageError(error)) return;
+    const threshold = Number(config.strategy.buy6004CooldownAfter);
+    const cooldownMs = Number(config.strategy.buy6004CooldownMs);
+    const windowMs = Number(config.strategy.buy6004FailureWindowMs);
+    if (!Number.isFinite(threshold) || threshold <= 0 || !Number.isFinite(cooldownMs) || cooldownMs <= 0) {
+      return;
+    }
+
+    const now = Date.now();
+    const prev = this._buy6004Failures.get(mint);
+    const withinWindow = prev && Number.isFinite(windowMs) && windowMs > 0 && now - prev.firstTs <= windowMs;
+    const next = withinWindow
+      ? { count: prev.count + 1, firstTs: prev.firstTs }
+      : { count: 1, firstTs: now };
+    this._buy6004Failures.set(mint, next);
+    monitor.set('SignalEngine.buy6004FailCount', next.count, 'SignalEngine');
+
+    if (next.count >= threshold) {
+      this._exitCooldowns.set(mint, now + cooldownMs);
+      this._exitCooldownReasons.set(mint, '6004 fee-burn guard');
+      this._buy6004Failures.delete(mint);
+      monitor.inc('SignalEngine.buy6004Cooldown', 1, 'SignalEngine');
+      console.log(
+        `[SignalEngine] 🔒 6004 fee-burn cooldown ${symbol || mint.slice(0, 6)} ` +
+        `for ${Math.round(cooldownMs / 1000)}s after ${next.count} slippage failures`,
+      );
+    }
+  }
+
+  recordBuyLanded(mint) {
+    if (!mint) return;
+    this._buy6004Failures.delete(mint);
+    this._exitCooldownReasons.delete(mint);
   }
 
   async handleDumpSignal(signal) {
@@ -456,7 +631,8 @@ class SignalEngine extends EventEmitter {
       const exitCooldown = this._exitCooldowns.get(mint);
       if (exitCooldown && Date.now() < exitCooldown) {
         monitor.inc('SignalEngine.rejectedRebuyCooldown', 1, 'SignalEngine');
-        this._logReject(signal, 'REBUY_COOLDOWN: sold this mint recently, cooldown ' + Math.round((exitCooldown - Date.now()) / 1000) + 's remaining');
+        const reason = this._exitCooldownReasons.get(mint) || 'sold this mint recently';
+        this._logReject(signal, 'REBUY_COOLDOWN: ' + reason + ', cooldown ' + Math.round((exitCooldown - Date.now()) / 1000) + 's remaining');
         return;
       }
     }
@@ -752,6 +928,14 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
+    signal._poolCompetitionBaseline = this.getPoolCompetitionPressure(signal.poolAddress, slot);
+    const competitionCheck = this.checkPoolCompetition(signal);
+    if (!competitionCheck.ok) {
+      monitor.inc('SignalEngine.rejectedSameSlotCompetition', 1, 'SignalEngine');
+      this._logReject(signal, competitionCheck.reason);
+      return;
+    }
+
     monitor.inc('SignalEngine.signalsAccepted', 1, 'SignalEngine');
     this.inflightBuys.add(mint);  // v3.23: 在emit前就标记，防并发同币双买
     this.lastTriggerTs.set(mint, Date.now());
@@ -781,6 +965,9 @@ class SignalEngine extends EventEmitter {
       rsi30sPreDump: signal._rsi30sPreDump,
       preVol5m: signal._preVol5m,
       dumpDepth: signal._dumpDepth,
+      _poolCompetition: competitionCheck.stats,
+      _poolCompetitionBaseline: signal._poolCompetitionBaseline,
+      _slotGap: slotGap,
     });
 
     // v3.17.16: 监控 signal 到 emit buyOrder 的耗时(应该 < 5ms)

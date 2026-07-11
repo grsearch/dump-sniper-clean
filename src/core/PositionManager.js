@@ -700,6 +700,9 @@ class PositionManager extends EventEmitter {
         pos._reconcileWatchdog = null;
       }
       this.emit('buyChainFailed', { positionId, mint, symbol: pos.symbol, signature, error: errMsg });
+      if (this.signalEngine?.recordBuyChainFailure) {
+        this.signalEngine.recordBuyChainFailure(mint, pos.symbol, errMsg);
+      }
 
       // v3.32: IncorrectProgramId → pool 已迁移到 Raydium，标记 pool dead 防止再次浪费费
       if (errMsg && (errMsg.includes('IncorrectProgramId') || errMsg.includes('IncorrectProgramId'))) {
@@ -737,6 +740,10 @@ class PositionManager extends EventEmitter {
     // ============ 分支 B: BUY 链上成功，但解析失败 ============
     // v3.17.14: 三路 race 时 Slipstream 返回的 sig 可能不是链上 sig
     // 如果 fetchTxSwapResult 失败，先用钱包余额判断是否真的买到了
+    if (this.signalEngine?.recordBuyLanded) {
+      this.signalEngine.recordBuyLanded(mint);
+    }
+
     const swap = await this.executor.fetchTxSwapResult(signature, mint);
     if (!swap || !swap.success) {
       // 二次验证：钱包里有 token 就说明买入成功，只是 sig 不对
@@ -843,17 +850,22 @@ class PositionManager extends EventEmitter {
     const drift = ((realSolSpent - oldEntrySol) / oldEntrySol) * 100;
     const maxReconcileDriftPct = parseFloat(process.env.MAX_RECONCILE_DRIFT_PCT || '-40');
     if (maxReconcileDriftPct < 0 && drift < maxReconcileDriftPct) {
+      const fillRatio = oldEntrySol > 0 ? realSolSpent / oldEntrySol : 1;
+      const tinyFillRatio = Number(config.strategy.reconcileTinyFillRatio ?? 0.5);
+      const isTinyFill = Number.isFinite(tinyFillRatio) && tinyFillRatio > 0 && fillRatio < tinyFillRatio;
+      const exitReason = isTinyFill ? 'RECONCILE_TINY_FILL' : 'RECONCILE_RUG';
       console.warn(
-        `[PositionManager] 🚨 RECONCILE_RUG ${pos.symbol || mint.slice(0, 6)}: ` +
+        `[PositionManager] 🚨 ${exitReason} ${pos.symbol || mint.slice(0, 6)}: ` +
           `drift=${drift.toFixed(2)}% < ${maxReconcileDriftPct}%, ` +
+          `fillRatio=${(fillRatio * 100).toFixed(1)}%, ` +
           `entrySol ${oldEntrySol.toFixed(4)}→${realSolSpent.toFixed(4)}, ` +
           `immediate sell`,
       );
-      monitor.inc('PositionManager.reconcileRug', 1, 'PositionManager');
+      monitor.inc(isTinyFill ? 'PositionManager.reconcileTinyFill' : 'PositionManager.reconcileRug', 1, 'PositionManager');
       // 不进入 stabilization，直接卖出
       pos.reconciled = true;
       pos.reconciledAt = Date.now();
-      this._exit(pos, pos.entryPrice, 'RECONCILE_RUG');
+      this._exit(pos, pos.entryPrice, exitReason);
       return;
     }
 
