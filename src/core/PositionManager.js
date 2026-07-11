@@ -843,17 +843,22 @@ class PositionManager extends EventEmitter {
     const drift = ((realSolSpent - oldEntrySol) / oldEntrySol) * 100;
     const maxReconcileDriftPct = parseFloat(process.env.MAX_RECONCILE_DRIFT_PCT || '-40');
     if (maxReconcileDriftPct < 0 && drift < maxReconcileDriftPct) {
+      const fillRatio = oldEntrySol > 0 ? realSolSpent / oldEntrySol : 1;
+      const tinyFillRatio = Number(config.strategy.reconcileTinyFillRatio ?? 0.5);
+      const isTinyFill = Number.isFinite(tinyFillRatio) && tinyFillRatio > 0 && fillRatio < tinyFillRatio;
+      const exitReason = isTinyFill ? 'RECONCILE_TINY_FILL' : 'RECONCILE_RUG';
       console.warn(
-        `[PositionManager] 🚨 RECONCILE_RUG ${pos.symbol || mint.slice(0, 6)}: ` +
+        `[PositionManager] 🚨 ${exitReason} ${pos.symbol || mint.slice(0, 6)}: ` +
           `drift=${drift.toFixed(2)}% < ${maxReconcileDriftPct}%, ` +
+          `fillRatio=${(fillRatio * 100).toFixed(1)}%, ` +
           `entrySol ${oldEntrySol.toFixed(4)}→${realSolSpent.toFixed(4)}, ` +
           `immediate sell`,
       );
-      monitor.inc('PositionManager.reconcileRug', 1, 'PositionManager');
+      monitor.inc(isTinyFill ? 'PositionManager.reconcileTinyFill' : 'PositionManager.reconcileRug', 1, 'PositionManager');
       // 不进入 stabilization，直接卖出
       pos.reconciled = true;
       pos.reconciledAt = Date.now();
-      this._exit(pos, pos.entryPrice, 'RECONCILE_RUG');
+      this._exit(pos, pos.entryPrice, exitReason);
       return;
     }
 

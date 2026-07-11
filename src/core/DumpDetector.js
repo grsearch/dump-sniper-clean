@@ -654,10 +654,21 @@ class DumpDetector extends EventEmitter {
     ];
 
     // 在 accountKeys 中找 vault 对应的 accountIndex
-    const baseVaultIdx = allKeys.findIndex((k) => k === poolBaseVault);
-    const quoteVaultIdx = poolQuoteVault
+    let baseVaultIdx = allKeys.findIndex((k) => k === poolBaseVault);
+    let quoteVaultIdx = poolQuoteVault
       ? allKeys.findIndex((k) => k === poolQuoteVault)
       : -1;
+
+    // 防错池 vault：token account 的 owner 必须等于当前 pool_address。
+    // 多池 token 或 DB 旧数据可能出现 pool_address 与 vault 属于不同池子的情况；
+    // 这种情况下 tx_post_balances 会变成“精确但属于错池”的危险储备。
+    const poolAddress = tokenInfo.pool_address;
+    if (baseVaultIdx >= 0 && !this._validateVaultOwner(postBalances, baseVaultIdx, baseMint, poolAddress, 'base', signature)) {
+      baseVaultIdx = -1;
+    }
+    if (quoteVaultIdx >= 0 && !this._validateVaultOwner(postBalances, quoteVaultIdx, WSOL_MINT, poolAddress, 'quote', signature)) {
+      quoteVaultIdx = -1;
+    }
 
     // v3.17.26 DEBUG: removed (YOTS_MINT was undefined → ReferenceError crashed ALL parsing)
 
@@ -985,6 +996,36 @@ class DumpDetector extends EventEmitter {
       return normalizeRawTokenAmount(b.uiTokenAmount);
     }
     return null;
+  }
+
+  _findBalanceEntry(balances, accountIndex, expectedMint) {
+    for (const b of balances) {
+      if (b.accountIndex !== accountIndex) continue;
+      if (expectedMint && b.mint !== expectedMint) continue;
+      return b;
+    }
+    return null;
+  }
+
+  _validateVaultOwner(balances, accountIndex, expectedMint, expectedOwner, label, signature) {
+    if (!expectedOwner) return false;
+    const entry = this._findBalanceEntry(balances, accountIndex, expectedMint);
+    if (!entry) {
+      monitor.inc('DumpDetector.vaultOwnerMissingBalance', 1, 'DumpDetector');
+      return false;
+    }
+    const owner = encodeBase58(entry.owner);
+    if (!owner || owner !== expectedOwner) {
+      monitor.inc('DumpDetector.vaultOwnerMismatch', 1, 'DumpDetector');
+      console.warn(
+        `[DumpDetector] ⚠️ vault owner mismatch (${label}): ` +
+        `idx=${accountIndex} mint=${expectedMint?.slice?.(0, 8) || '?'} ` +
+        `owner=${owner || 'none'} expectedPool=${expectedOwner} ` +
+        `sig=${signature?.slice?.(0, 8) || 'unknown'}..`,
+      );
+      return false;
+    }
+    return true;
   }
 
   _extractSignature(tx) {

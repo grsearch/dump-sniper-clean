@@ -95,6 +95,7 @@ const config = {
     // 紧急止损（防止灾难性下跌）
     // 设置为 0 可禁用紧急止损（恢复"硬扛"行为）
     emergencyStopLossPct: parseFloat(process.env.EMERGENCY_STOP_LOSS_PCT || '-25'),
+    reconcileTinyFillRatio: parseFloat(process.env.RECONCILE_TINY_FILL_RATIO || '0.5'),
 
     // v3.17.42: 智能止损 — 分波动率止损阈值
     // 智能规则: trailing已armed时不触发(trailing自行处理回撤), 只救trailing永远不armed的死扛仓位
@@ -135,6 +136,10 @@ const config = {
     // Executor 会走一次同步 RPC fallback，再用精确储备覆盖，cache hit 热路径不补 RPC。
     firstBuyOnly: (process.env.FIRST_BUY_ONLY ?? 'true').toLowerCase() === 'true',
     firstBuySlippageBps: parseInt(process.env.FIRST_BUY_SLIPPAGE_BPS || '200', 10),
+    // 防错池 vault：tx_post_balances 精确储备与当前 pool metadata/cache 储备差异过大时拒绝 BUY
+    firstBuyReserveMismatchMaxPct: parseFloat(process.env.FIRST_BUY_RESERVE_MISMATCH_MAX_PCT || '50'),
+    // 防 tiny-fill：SDK 算出的 token 数量按真实 pool 中间价折算，低于下单额该比例则拒绝 BUY
+    firstBuyMinQuoteValueRatio: parseFloat(process.env.FIRST_BUY_MIN_QUOTE_VALUE_RATIO || '0.5'),
 
     // 风控（v3.17 默认 maxConcurrent 5）
     cooldownMsPerToken: parseInt(process.env.COOLDOWN_MS_PER_TOKEN || '60000', 10),
