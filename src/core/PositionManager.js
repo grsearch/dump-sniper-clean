@@ -700,6 +700,9 @@ class PositionManager extends EventEmitter {
         pos._reconcileWatchdog = null;
       }
       this.emit('buyChainFailed', { positionId, mint, symbol: pos.symbol, signature, error: errMsg });
+      if (this.signalEngine?.recordBuyChainFailure) {
+        this.signalEngine.recordBuyChainFailure(mint, pos.symbol, errMsg);
+      }
 
       // v3.32: IncorrectProgramId → pool 已迁移到 Raydium，标记 pool dead 防止再次浪费费
       if (errMsg && (errMsg.includes('IncorrectProgramId') || errMsg.includes('IncorrectProgramId'))) {
@@ -737,6 +740,10 @@ class PositionManager extends EventEmitter {
     // ============ 分支 B: BUY 链上成功，但解析失败 ============
     // v3.17.14: 三路 race 时 Slipstream 返回的 sig 可能不是链上 sig
     // 如果 fetchTxSwapResult 失败，先用钱包余额判断是否真的买到了
+    if (this.signalEngine?.recordBuyLanded) {
+      this.signalEngine.recordBuyLanded(mint);
+    }
+
     const swap = await this.executor.fetchTxSwapResult(signature, mint);
     if (!swap || !swap.success) {
       // 二次验证：钱包里有 token 就说明买入成功，只是 sig 不对

@@ -176,7 +176,10 @@ async function main() {
     followSellMinWinRate: parseFloat(process.env.COMPETITOR_FOLLOW_SELL_MIN_WINRATE || '60'),
     followSellMinClosed: parseInt(process.env.COMPETITOR_FOLLOW_SELL_MIN_CLOSED || '10', 10),
   });
-  dumpDetector.on("swapParsed", (swap) => { try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ } });
+  dumpDetector.on("swapParsed", (swap) => {
+    try { signalEngine.handleSwapParsed(swap); } catch (_) { /* keep hot path safe */ }
+    try { competitorTracker.handleSwap(swap); } catch (_) { /* prevent CT errors from breaking DumpDetector */ }
+  });
 
   // ============ 报告 ============
   const dailyReport = new DailyReport({ tradeLogger, tokenRegistry, competitorTracker });
@@ -678,6 +681,34 @@ async function main() {
     }
 
     // 用同一个 positionId 贯穿 BUY trade / position 表
+    const competitionCheck = signalEngine.checkPoolCompetition
+      ? signalEngine.checkPoolCompetition(order)
+      : { ok: true, stats: order._poolCompetition || null };
+    if (!competitionCheck.ok) {
+      const reason = competitionCheck.reason || 'same-slot competition';
+      console.warn(`[main] BUY rejected ${order.symbol || order.mint.slice(0, 6)}: ${reason}`);
+      try {
+        tradeLogger.logSignal({
+          ts: Date.now(),
+          mint: order.mint,
+          symbol: order.symbol,
+          kind: 'BUY_REJECTED',
+          sellSol: order.sellSol,
+          priceImpactPct: order.priceImpactPct,
+          seller: order.seller,
+          sellerTx: order.signature,
+          notes: `pre-submit reject; ${reason}`,
+          accepted: false,
+          rejectReason: reason,
+        });
+      } catch (err) {
+        monitor.recordError('main', err, { phase: 'log_pre_submit_competition_reject' });
+      }
+      signalEngine.markBuyDone(order.mint);
+      return;
+    }
+    order._poolCompetition = competitionCheck.stats || order._poolCompetition || null;
+
     const positionId = crypto.randomUUID();
 
     // 标记此 mint 正在 buy 中，让后续并发 dumpSignal 看到这个槽位被占
@@ -713,6 +744,12 @@ async function main() {
         poolBaseAfterRaw: order.poolBaseAfterRaw,
         poolQuoteAfterRaw: order.poolQuoteAfterRaw,
         exactReserveSource: order.exactReserveSource,
+        sellSol: order.sellSol,
+        priceImpactPct: order.priceImpactPct,
+        slot: order.slot,
+        submitSlot,
+        _slotGap: order._slotGap,
+        _poolCompetition: order._poolCompetition,
       });
     } finally {
       signalEngine.markBuyDone(order.mint);

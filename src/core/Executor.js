@@ -1021,6 +1021,34 @@ class Executor {
     return { submitMode, feeMode, reason };
   }
 
+  _resolveFirstBuySlippageBps(order) {
+    const baseBps = Number(config.strategy.firstBuySlippageBps) || 0;
+    if (!config.strategy.firstBuyOnly || !config.strategy.firstBuyDynamicSlippage) return baseBps;
+    if (order?.exactReserveSource !== 'tx_post_balances') return baseBps;
+
+    const lowCompetitionBps = Number(config.strategy.firstBuyLowCompetitionSlippageBps) || 0;
+    if (lowCompetitionBps <= baseBps) return baseBps;
+
+    const slotGap = Number.isFinite(order?._slotGap)
+      ? order._slotGap
+      : (order?.slot && order?.submitSlot ? order.submitSlot - order.slot : null);
+    const competition = order?._poolCompetition || null;
+    const noKnownCompetition =
+      competition &&
+      (competition.buyCount || 0) === 0 &&
+      (competition.buySol || 0) === 0 &&
+      (competition.maxSingleBuySol || 0) === 0;
+    const sellSol = Number(order?.sellSol) || 0;
+    const maxSellSol = Number(config.strategy.firstBuyLowCompetitionMaxSellSol);
+    const sellSizeOk = !Number.isFinite(maxSellSol) || maxSellSol <= 0 || sellSol <= maxSellSol;
+
+    if (slotGap === 0 && noKnownCompetition && sellSizeOk) {
+      monitor.inc('Executor.firstBuyDynamicSlippage', 1, 'Executor');
+      return lowCompetitionBps;
+    }
+    return baseBps;
+  }
+
   /**
    * 买入：SOL → token，固定 SOL 输入。
    */
@@ -1287,7 +1315,7 @@ class Executor {
           order,
           firstBuyOnly: config.strategy.firstBuyOnly,
           buySlippageBps: config.strategy.buySlippageBps,
-          firstBuySlippageBps: config.strategy.firstBuySlippageBps,
+          firstBuySlippageBps: this._resolveFirstBuySlippageBps(order),
         });
         swapState = prepared.swapState;
         slippagePct = prepared.slippagePct;

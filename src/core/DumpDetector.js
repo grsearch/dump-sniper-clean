@@ -1008,22 +1008,25 @@ class DumpDetector extends EventEmitter {
   }
 
   _validateVaultOwner(balances, accountIndex, expectedMint, expectedOwner, label, signature) {
-    if (!expectedOwner) return false;
     const entry = this._findBalanceEntry(balances, accountIndex, expectedMint);
     if (!entry) {
       monitor.inc('DumpDetector.vaultOwnerMissingBalance', 1, 'DumpDetector');
       return false;
     }
+
+    // Hard guard is mint matching: this catches wrong-vault / wrong-pool reserve reads.
+    // Do not require token-account owner === pool_address. PumpSwap v1 SPL-token vaults
+    // can be owned by a PDA rather than the pool account itself, while Token-2022/v2
+    // layouts may expose pool_address directly.
     const owner = encodeBase58(entry.owner);
     if (!owner || owner !== expectedOwner) {
-      monitor.inc('DumpDetector.vaultOwnerMismatch', 1, 'DumpDetector');
+      monitor.inc('DumpDetector.vaultOwnerNonPool', 1, 'DumpDetector');
       console.warn(
-        `[DumpDetector] ⚠️ vault owner mismatch (${label}): ` +
+        `[DumpDetector] ℹ️ vault owner differs from pool (${label}, mint ok): ` +
         `idx=${accountIndex} mint=${expectedMint?.slice?.(0, 8) || '?'} ` +
         `owner=${owner || 'none'} expectedPool=${expectedOwner} ` +
         `sig=${signature?.slice?.(0, 8) || 'unknown'}..`,
       );
-      return false;
     }
     return true;
   }

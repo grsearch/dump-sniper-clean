@@ -176,8 +176,25 @@ const config = {
     // 1 tolerates the normal one-slot skew where tx stream arrives just before
     // SlotSub/latestSlot catches up; -1 = disable.
     maxFutureDumpSlotGap: parseInt(process.env.MAX_FUTURE_DUMP_SLOT_GAP || '1', 10),
-    // Hard BUY freshness gate: 1 = only same-slot / next-slot attempts; -1 disables.
-    maxBuySubmitSlotGap: parseInt(process.env.MAX_BUY_SUBMIT_SLOT_GAP || '1', 10),
+    // Hard BUY freshness gate: 0 = only same-slot attempts; -1 disables.
+    maxBuySubmitSlotGap: parseInt(process.env.MAX_BUY_SUBMIT_SLOT_GAP || '0', 10),
+    // Same-pool competition guard: in-memory only, fed by already parsed swaps.
+    // If we have already seen other BUYs in the same pool+slot before our BUY,
+    // the "needle" is likely gone and submitting only burns priority fee.
+    firstBuyCompetitionFilter: (process.env.FIRST_BUY_COMPETITION_FILTER ?? 'true').toLowerCase() === 'true',
+    firstBuyMaxCompetingBuys: parseInt(process.env.FIRST_BUY_MAX_COMPETING_BUYS || '3', 10),
+    firstBuyMaxCompetingSol: parseFloat(process.env.FIRST_BUY_MAX_COMPETING_SOL || '2'),
+    firstBuyMaxSingleCompetingBuySol: parseFloat(process.env.FIRST_BUY_MAX_SINGLE_COMPETING_BUY_SOL || '3'),
+    // Keep the default tight, and only widen for known low-competition same-slot
+    // entries. This is not a global high-slippage mode.
+    firstBuyDynamicSlippage: (process.env.FIRST_BUY_DYNAMIC_SLIPPAGE ?? 'true').toLowerCase() === 'true',
+    firstBuyLowCompetitionSlippageBps: parseInt(process.env.FIRST_BUY_LOW_COMPETITION_SLIPPAGE_BPS || '250', 10),
+    firstBuyLowCompetitionMaxSellSol: parseFloat(process.env.FIRST_BUY_LOW_COMPETITION_MAX_SELL_SOL || '20'),
+    // Fee-burn guard for repeated on-chain Custom:6004 / ExceededSlippage on a
+    // single mint. This is intentionally separate from normal rebuy cooldowns.
+    buy6004CooldownAfter: parseInt(process.env.BUY_6004_COOLDOWN_AFTER || '2', 10),
+    buy6004CooldownMs: parseInt(process.env.BUY_6004_COOLDOWN_MS || '900000', 10),
+    buy6004FailureWindowMs: parseInt(process.env.BUY_6004_FAILURE_WINDOW_MS || '1800000', 10),
     // v3.17.29: push lag 阈值 — 砸盘落链到我们收到处理的最大墙钟差(ms)
     // 超过此阈值即拒(反弹已经过了,买在山顶)
     // 设 0 禁用此检查(fallback 旧的 slot gap 路径)
