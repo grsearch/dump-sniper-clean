@@ -571,6 +571,8 @@ class TickStream extends EventEmitter {
       console.log(`[TickStream:SS] ShredStream enabled on UDP port ${this.shredStreamPort}`);
     } else if (this.shredStreamPort > 0 && !ShredListener) {
       console.warn('[TickStream:SS] SHREDSTREAM_PORT set but shredstream SDK not installed');
+    } else {
+      console.warn('[TickStream:SS] ShredStream disabled (set SHREDSTREAM_PORT, e.g. 8001, to enable UDP shred intake)');
     }
 
     // v3.17.17: 注入 tokenRegistry 用于 SS pre-warm 的 base_vault → mint 反查
@@ -1120,7 +1122,7 @@ class TickStream extends EventEmitter {
     if (this.shredStreamPort <= 0 || !ShredListener) return;
     if (this._shredStreamRunning) return;
 
-    // v3.17.17: 检查 Linux UDP buffer 是否调够 (默认 256KB,SDK 推荐 25MB)
+    // v3.17.17: 检查 Linux UDP buffer 是否调够 (默认 256KB,SDK v2 默认 recvBuf=64MB)
     // 不调够会在高负载下丢 shred — 实测「时不时漏 1 个 slot」就是这个症状
     this._checkUdpBuffer();
 
@@ -1144,25 +1146,27 @@ class TickStream extends EventEmitter {
 
   /**
    * v3.17.17: 检查 Linux UDP rmem_max 是否调够
-   * shredstream.com 文档要求 ≥ 25MB,否则在高 shred 流量下丢包
+   * shredstream SDK v2 默认 recvBuf=64MB,否则在高 shred 流量下丢包
    */
   _checkUdpBuffer() {
     if (process.platform !== 'linux') return; // 只 Linux 有这个问题
     try {
       const fs = require('fs');
       const max = parseInt(fs.readFileSync('/proc/sys/net/core/rmem_max', 'utf8').trim(), 10);
-      const REQUIRED = 26_214_400; // 25 MB
+      const REQUIRED = 67_108_864; // 64 MB
       if (max < REQUIRED) {
         console.warn(
-          `[TickStream:SS] ⚠️  net.core.rmem_max=${max} (${(max/1024/1024).toFixed(1)} MB) < 25 MB. ` +
+          `[TickStream:SS] ⚠️  net.core.rmem_max=${max} (${(max/1024/1024).toFixed(1)} MB) < 64 MB. ` +
           `Will likely drop shreds under load. Fix:\n` +
-          `    sudo sysctl -w net.core.rmem_max=26214400\n` +
-          `    sudo sysctl -w net.core.rmem_default=26214400\n` +
-          `    echo 'net.core.rmem_max=26214400' | sudo tee -a /etc/sysctl.conf\n` +
-          `    echo 'net.core.rmem_default=26214400' | sudo tee -a /etc/sysctl.conf`,
+          `    sudo sysctl -w net.core.rmem_max=67108864\n` +
+          `    sudo sysctl -w net.core.rmem_default=67108864\n` +
+          `    sudo sysctl -w net.core.busy_read=200\n` +
+          `    echo 'net.core.rmem_max=67108864' | sudo tee -a /etc/sysctl.conf\n` +
+          `    echo 'net.core.rmem_default=67108864' | sudo tee -a /etc/sysctl.conf\n` +
+          `    echo 'net.core.busy_read=200' | sudo tee -a /etc/sysctl.conf`,
         );
       } else {
-        console.log(`[TickStream:SS] ✓ net.core.rmem_max=${(max/1024/1024).toFixed(1)} MB (≥ 25 MB required)`);
+        console.log(`[TickStream:SS] ✓ net.core.rmem_max=${(max/1024/1024).toFixed(1)} MB (≥ 64 MB required)`);
       }
     } catch (err) {
       // /proc 读取失败 (容器或非 Linux),跳过检查
