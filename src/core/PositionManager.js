@@ -127,6 +127,10 @@ class PositionManager extends EventEmitter {
     );
   }
 
+  _isUnconfirmedLiveBuy(pos) {
+    return !!(pos && !pos.dryRun && !pos.reconciled);
+  }
+
   // v3.17.40b: 加仓策略 — 自最近一笔买入价跌15%以上才允许加仓
   //   首仓后：当前价 < 首仓entryPrice * 0.85 → 允许第1次加仓
   //   第1次加仓后：当前价 < 加仓entryPrice * 0.85 → 允许第2次加仓
@@ -681,6 +685,10 @@ class PositionManager extends EventEmitter {
         exitReason,
         sellSignature: null,
       });
+      this.tradeLogger.updateTradeStatus?.(positionId, 'BUY', {
+        success: false,
+        error: errMsg,
+      });
 
       this.positions.delete(positionId);
       this._removeByMint(mint, positionId);
@@ -758,6 +766,10 @@ class PositionManager extends EventEmitter {
         pos.reconciled = true;
         pos.reconciledAt = Date.now();
         monitor.inc('PositionManager.buyReconcileFallback', 1, 'PositionManager');
+        this.tradeLogger.updateTradeStatus?.(positionId, 'BUY', {
+          success: true,
+          error: null,
+        });
         if (pos._reconcileWatchdog) {
           clearTimeout(pos._reconcileWatchdog);
           pos._reconcileWatchdog = null;
@@ -781,6 +793,10 @@ class PositionManager extends EventEmitter {
         pnlPct: -100,
         exitReason: 'BUY_PARSE_FAILED',
         sellSignature: null,
+      });
+      this.tradeLogger.updateTradeStatus?.(positionId, 'BUY', {
+        success: false,
+        error: 'BUY_PARSE_FAILED',
       });
       this.positions.delete(positionId);
       this._removeByMint(mint, positionId);
@@ -848,6 +864,22 @@ class PositionManager extends EventEmitter {
     // v3.17.13: reconcile 后 drift 检查 — 防止 RUG 后继续持有
     //   drift 必须在这里先算（原来在后面 console.log 那行定义的）
     const drift = ((realSolSpent - oldEntrySol) / oldEntrySol) * 100;
+    this.tradeLogger.updateTradeStatus?.(positionId, 'BUY', {
+      success: true,
+      error: null,
+    });
+    if (result.slot && result.slot > 0 && (!pos.buySlot || pos.buySlot <= 0)) {
+      pos.buySlot = result.slot;
+      pos.slotExitStartSlot = result.slot;
+    }
+    this.tradeLogger.updatePositionEntry(positionId, {
+      entrySol: pos.entrySol,
+      entryPrice: pos.entryPrice,
+      tokenAmount: pos.tokenAmount,
+      buyFeeLamports: 0,
+      buySlot: pos.buySlot,
+      dumpSlot: pos.dumpSlot,
+    });
     const maxReconcileDriftPct = parseFloat(process.env.MAX_RECONCILE_DRIFT_PCT || '-40');
     if (maxReconcileDriftPct < 0 && drift < maxReconcileDriftPct) {
       const fillRatio = oldEntrySol > 0 ? realSolSpent / oldEntrySol : 1;
@@ -954,11 +986,12 @@ class PositionManager extends EventEmitter {
     for (const pos of this.positions.values()) {
       if (pos.exiting) continue;
       if (this._isPendingBundleOnlyBuy(pos)) continue;
+      if (this._isUnconfirmedLiveBuy(pos)) continue;
 
       // v3.17.11: SLOT_EXIT — 买入后 N 个 slot 全部卖出
       // 优先级最高，不受 reconciled/stabilizing 限制
       const slotExitGap = config.strategy.slotExitGap;
-      const slotExitAnchor = pos.buySlot || pos.slotExitStartSlot || 0;
+      const slotExitAnchor = pos.buySlot || 0;
       if (slotExitGap > 0 && slotExitAnchor > 0 && currentSlot > 0) {
         const slotsSinceBuy = currentSlot - slotExitAnchor;
         if (slotsSinceBuy >= slotExitGap) {
@@ -1416,6 +1449,7 @@ class PositionManager extends EventEmitter {
     // v3.26: stuck 仓位不再触发退出逻辑（pool已死，卖出会循环失败）
     if (pos.status === 'stuck') return;
     if (this._isPendingBundleOnlyBuy(pos)) return;
+    if (this._isUnconfirmedLiveBuy(pos)) return;
 
     // v3.20: 获取此仓位的买入前波动率
     const preVol5m = pos.preVol5m;
@@ -1456,7 +1490,7 @@ class PositionManager extends EventEmitter {
     // v3.17.11: SLOT_EXIT — 最高优先级，不受 reconciled/stabilizing 限制
     const slotExitGap = config.strategy.slotExitGap;
     const currentSlot = this.tickStream ? this.tickStream.latestSlot : 0;
-    const slotExitAnchor = pos.buySlot || pos.slotExitStartSlot || 0;
+    const slotExitAnchor = pos.buySlot || 0;
     if (slotExitGap > 0 && slotExitAnchor > 0 && currentSlot > 0) {
       const slotsSinceBuy = currentSlot - slotExitAnchor;
       if (slotsSinceBuy >= slotExitGap) {
@@ -2063,6 +2097,17 @@ class PositionManager extends EventEmitter {
       }
       return;
     }
+    if (this._isUnconfirmedLiveBuy(pos)) {
+      monitor.inc('PositionManager.skippedExitUnconfirmedBuy', 1, 'PositionManager');
+      if (!pos._loggedUnconfirmedExitSkip) {
+        pos._loggedUnconfirmedExitSkip = true;
+        console.warn(
+          `[PositionManager] ⏳ skip exit ${pos.symbol || pos.mint.slice(0, 6)} reason=${reason}: ` +
+          `BUY not confirmed/reconciled yet`,
+        );
+      }
+      return;
+    }
     pos.exiting = true;
     pos.exitReason = reason;
 
@@ -2534,6 +2579,32 @@ class PositionManager extends EventEmitter {
     const hasTokenGone6053 = errMsg && (errMsg.includes('Custom:6053') || errMsg.includes('Custom":6053'));
     const hasTokenGone1 = errMsg && (errMsg.includes('Custom:1}') || errMsg.includes('Custom":1}'));
     if (hasTokenGone6053 || hasTokenGone1) {
+      if (this._isUnconfirmedLiveBuy(pos)) {
+        monitor.inc('PositionManager.sellAbandoned_unconfirmedBuyTokenGone', 1, 'PositionManager');
+        const feeSol = ((pos.sellFeeLamports || 0) + 5000) / 1e9;
+        console.warn(
+          `[PositionManager] ⚠️ SELL got token-gone before BUY reconcile ${pos.symbol || pos.mint.slice(0, 6)}; ` +
+          `closing as BUY_NOT_LANDED instead of ${pos.entrySol} SOL loss`,
+        );
+        this.tradeLogger.closePosition(pos.positionId, {
+          closedAt: Date.now(),
+          exitPrice: triggerPrice,
+          exitSol: 0,
+          pnlSol: -feeSol,
+          pnlPct: feeSol > 0 ? -100 : 0,
+          exitReason: 'BUY_NOT_LANDED',
+          sellSignature: pos._lastSellSignature || null,
+        });
+        this.tradeLogger.updateTradeStatus?.(pos.positionId, 'BUY', {
+          success: false,
+          error: 'unconfirmed_buy_token_gone',
+        });
+        this.positions.delete(pos.positionId);
+        this._removeByMint(pos.mint, pos.positionId);
+        if (this.executor?.poolStateCache) this.executor.poolStateCache.removeHot(pos.mint);
+        monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+        return;
+      }
       monitor.inc('PositionManager.sellAbandoned_tokenGone', 1, 'PositionManager');
       const errType = hasTokenGone6053 ? 'Custom:6053' : 'Custom:1';
       console.warn(

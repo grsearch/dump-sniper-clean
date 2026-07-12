@@ -188,7 +188,7 @@ const config = {
     // Keep the default tight, and only widen for known low-competition same-slot
     // entries. This is not a global high-slippage mode.
     firstBuyDynamicSlippage: (process.env.FIRST_BUY_DYNAMIC_SLIPPAGE ?? 'true').toLowerCase() === 'true',
-    firstBuyLowCompetitionSlippageBps: parseInt(process.env.FIRST_BUY_LOW_COMPETITION_SLIPPAGE_BPS || '250', 10),
+    firstBuyLowCompetitionSlippageBps: parseInt(process.env.FIRST_BUY_LOW_COMPETITION_SLIPPAGE_BPS || '300', 10),
     firstBuyLowCompetitionMaxSellSol: parseFloat(process.env.FIRST_BUY_LOW_COMPETITION_MAX_SELL_SOL || '20'),
     // Fee-burn guard for repeated on-chain Custom:6004 / ExceededSlippage on a
     // single mint. This is intentionally separate from normal rebuy cooldowns.

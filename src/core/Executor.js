@@ -176,7 +176,7 @@ class Executor {
     // transaction cannot be included successfully, Jito should not forward it
     // as a normal public transaction. No simulation is added to the hot path.
     this.buySubmitMode = (process.env.BUY_SUBMIT_MODE || 'jito_bundle_only').toLowerCase();
-    this.buySignalFeeTiering = (process.env.BUY_SIGNAL_FEE_TIERING ?? 'false').toLowerCase() === 'true';
+    this.buySignalFeeTiering = (process.env.BUY_SIGNAL_FEE_TIERING ?? 'true').toLowerCase() === 'true';
     this.lowConfidenceBuyFeeLamports = parseInt(process.env.LOW_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS || '300000', 10);
     this.jitoBlockEngineUrl = (process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf').replace(/\/+$/, '');
     this.jitoBundleTimeoutMs = parseInt(process.env.JITO_BUNDLE_TIMEOUT_MS || '1200', 10);
@@ -1008,17 +1008,51 @@ class Executor {
     let reason = 'normal';
 
     if (this.buySignalFeeTiering) {
-      const reserveSource = order?.exactReserveSource || 'none';
-      const strictExact = exactReserveFence && reserveSource === 'tx_post_balances';
-      if (!strictExact || Number(slippagePct) > 1) {
+      const confidence = this._classifyFirstBuyConfidence(order, {
+        exactReserveFence,
+        slippagePct,
+      });
+      if (!confidence.high) {
         feeMode = 'low_confidence';
-        reason = `low_confidence:${reserveSource},slip=${slippagePct}`;
+        reason = `low_confidence:${confidence.reason},slip=${slippagePct}`;
       } else {
-        reason = `high_confidence:${reserveSource},slip=${slippagePct}`;
+        reason = `high_confidence:${confidence.reason},slip=${slippagePct}`;
       }
     }
 
     return { submitMode, feeMode, reason };
+  }
+
+  _classifyFirstBuyConfidence(order, { exactReserveFence }) {
+    const reserveSource = order?.exactReserveSource || 'none';
+    const strictExact = exactReserveFence && reserveSource === 'tx_post_balances';
+    if (!strictExact) return { high: false, reason: `reserve=${reserveSource}` };
+
+    const slotGap = Number.isFinite(order?._slotGap)
+      ? Number(order._slotGap)
+      : (order?.slot && order?.submitSlot ? Number(order.submitSlot) - Number(order.slot) : null);
+    if (slotGap !== null && slotGap !== 0) return { high: false, reason: `slot_gap=${slotGap}` };
+
+    const competition = order?._poolCompetition || null;
+    if (!competition) return { high: false, reason: 'competition=unknown' };
+
+    const buyCount = Number(competition.buyCount) || 0;
+    const buySol = Number(competition.buySol) || 0;
+    const maxSingleBuySol = Number(competition.maxSingleBuySol) || 0;
+    if (buyCount > 0 || buySol > 0 || maxSingleBuySol > 0) {
+      return {
+        high: false,
+        reason: `competition=buys:${buyCount},sol:${buySol.toFixed(3)},max:${maxSingleBuySol.toFixed(3)}`,
+      };
+    }
+
+    const sellSol = Number(order?.sellSol) || 0;
+    const maxSellSol = Number(config.strategy.firstBuyLowCompetitionMaxSellSol);
+    if (Number.isFinite(maxSellSol) && maxSellSol > 0 && sellSol > maxSellSol) {
+      return { high: false, reason: `large_sell:${sellSol.toFixed(2)}>${maxSellSol}` };
+    }
+
+    return { high: true, reason: `needle:reserve=${reserveSource},slot_gap=0,no_competition` };
   }
 
   _resolveFirstBuySlippageBps(order) {

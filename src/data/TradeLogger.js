@@ -232,6 +232,18 @@ class TradeLogger {
                 @success, @dryRun, @reason, @latencyMs, @error)
       `),
 
+      updateLatestTradeStatus: this.db.prepare(`
+        UPDATE trades SET
+          success = @success,
+          error = @error
+        WHERE id = (
+          SELECT id FROM trades
+          WHERE position_id = @positionId AND side = @side
+          ORDER BY ts DESC
+          LIMIT 1
+        )
+      `),
+
       tradesInRange: this.db.prepare(`
         SELECT * FROM trades WHERE ts >= ? AND ts < ? ORDER BY ts ASC
       `),
@@ -439,6 +451,16 @@ class TradeLogger {
       dryRun: dryRun ? 1 : 0,
       reason: reason || null,
       latencyMs: latencyMs ?? null,
+      error: error || null,
+    });
+  }
+
+  updateTradeStatus(positionId, side, { success, error }) {
+    if (!positionId || !side) return;
+    this.stmts.updateLatestTradeStatus.run({
+      positionId,
+      side,
+      success: success ? 1 : 0,
       error: error || null,
     });
   }
