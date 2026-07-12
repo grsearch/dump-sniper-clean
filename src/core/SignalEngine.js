@@ -928,7 +928,8 @@ class SignalEngine extends EventEmitter {
       return;
     }
 
-    signal._poolCompetitionBaseline = this.getPoolCompetitionPressure(signal.poolAddress, slot);
+    signal._poolCompetitionRaw = this.getPoolCompetitionPressure(signal.poolAddress, slot);
+    signal._poolCompetitionBaseline = signal._poolCompetitionRaw;
     const competitionCheck = this.checkPoolCompetition(signal);
     if (!competitionCheck.ok) {
       monitor.inc('SignalEngine.rejectedSameSlotCompetition', 1, 'SignalEngine');
@@ -966,6 +967,7 @@ class SignalEngine extends EventEmitter {
       preVol5m: signal._preVol5m,
       dumpDepth: signal._dumpDepth,
       _poolCompetition: competitionCheck.stats,
+      _poolCompetitionRaw: signal._poolCompetitionRaw,
       _poolCompetitionBaseline: signal._poolCompetitionBaseline,
       _slotGap: slotGap,
     });

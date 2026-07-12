@@ -41,14 +41,16 @@ function withStrategy(overrides, fn) {
   }
 }
 
-test('fee tiering promotes ideal first-buy candidates to high-confidence fee even with 2-3% slippage', () => {
-  withStrategy({ firstBuyLowCompetitionMaxSellSol: 20 }, () => {
+test('fee tiering promotes ideal strict-needle candidates to high-confidence fee', () => {
+  withStrategy({ firstBuyNeedleMode: 'strict', firstBuyLowCompetitionMaxSellSol: 20 }, () => {
     const executor = makeExecutor();
     const plan = executor._classifyBuySubmission({
       exactReserveSource: 'tx_post_balances',
       sellSol: 12,
       _slotGap: 0,
       _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 100,
     }, {
       slippagePct: 3,
       exactReserveFence: true,
@@ -61,7 +63,7 @@ test('fee tiering promotes ideal first-buy candidates to high-confidence fee eve
 });
 
 test('fee tiering downgrades risky first-buy candidates to low fee', () => {
-  withStrategy({ firstBuyLowCompetitionMaxSellSol: 20 }, () => {
+  withStrategy({ firstBuyNeedleMode: 'strict', firstBuyLowCompetitionMaxSellSol: 20 }, () => {
     const executor = makeExecutor();
 
     const largeSell = executor._classifyBuySubmission({
@@ -69,18 +71,22 @@ test('fee tiering downgrades risky first-buy candidates to low fee', () => {
       sellSol: 35,
       _slotGap: 0,
       _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 100,
     }, {
       slippagePct: 2,
       exactReserveFence: true,
     });
     assert.equal(largeSell.feeMode, 'low_confidence');
-    assert.match(largeSell.reason, /large_sell/);
+    assert.match(largeSell.reason, /strict_large_sell/);
 
     const competition = executor._classifyBuySubmission({
       exactReserveSource: 'tx_post_balances',
       sellSol: 12,
       _slotGap: 0,
       _poolCompetition: { buyCount: 1, buySol: 0.4, maxSingleBuySol: 0.4 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 100,
     }, {
       slippagePct: 2,
       exactReserveFence: true,
@@ -93,12 +99,80 @@ test('fee tiering downgrades risky first-buy candidates to low fee', () => {
       sellSol: 12,
       _slotGap: 1,
       _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 100,
     }, {
       slippagePct: 2,
       exactReserveFence: true,
     });
     assert.equal(staleSlot.feeMode, 'low_confidence');
     assert.match(staleSlot.reason, /slot_gap=1/);
+  });
+});
+
+test('strict needle downgrades raw same-slot competition and stale signals', () => {
+  withStrategy({
+    firstBuyNeedleMode: 'strict',
+    firstBuyStrictMaxRawCompetingBuys: 0,
+    firstBuyStrictMaxSignalAgeMs: 800,
+  }, () => {
+    const executor = makeExecutor();
+    const rawCompetition = executor._classifyBuySubmission({
+      exactReserveSource: 'tx_post_balances',
+      sellSol: 12,
+      _slotGap: 0,
+      _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 1, buySol: 0.2, maxSingleBuySol: 0.2 },
+      _dumpTsToSubmitMs: 100,
+    }, {
+      slippagePct: 3,
+      exactReserveFence: true,
+    });
+    assert.equal(rawCompetition.feeMode, 'low_confidence');
+    assert.match(rawCompetition.reason, /raw_competition/);
+
+    const stale = executor._classifyBuySubmission({
+      exactReserveSource: 'tx_post_balances',
+      sellSol: 12,
+      _slotGap: 0,
+      _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 1200,
+    }, {
+      slippagePct: 3,
+      exactReserveFence: true,
+    });
+    assert.equal(stale.feeMode, 'low_confidence');
+    assert.match(stale.reason, /signal_age/);
+  });
+});
+
+test('strict needle caps widened dynamic slippage', () => {
+  withStrategy({
+    firstBuyOnly: true,
+    firstBuyDynamicSlippage: true,
+    firstBuySlippageBps: 200,
+    firstBuyLowCompetitionSlippageBps: 500,
+    firstBuyStrictMaxSlippageBps: 300,
+    firstBuyLowCompetitionMaxSellSol: 20,
+    firstBuyNeedleMode: 'strict',
+  }, () => {
+    const executor = makeExecutor();
+    const bps = executor._resolveFirstBuySlippageBps({
+      exactReserveSource: 'tx_post_balances',
+      sellSol: 12,
+      _slotGap: 0,
+      _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+    });
+    assert.equal(bps, 300);
+  });
+});
+
+test('low-confidence action can skip before signing and submitting', () => {
+  withStrategy({ lowConfidenceBuyAction: 'skip' }, () => {
+    const executor = makeExecutor();
+    assert.equal(executor._shouldSkipLowConfidenceBuy({ feeMode: 'low_confidence' }), true);
+    assert.equal(executor._shouldSkipLowConfidenceBuy({ feeMode: 'high_confidence' }), false);
   });
 });
 

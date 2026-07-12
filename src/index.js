@@ -687,6 +687,9 @@ async function main() {
     }
 
     // 用同一个 positionId 贯穿 BUY trade / position 表
+    if (signalEngine.getPoolCompetitionPressure) {
+      order._poolCompetitionRaw = signalEngine.getPoolCompetitionPressure(order.poolAddress, order.slot);
+    }
     const competitionCheck = signalEngine.checkPoolCompetition
       ? signalEngine.checkPoolCompetition(order)
       : { ok: true, stats: order._poolCompetition || null };
@@ -767,6 +770,7 @@ async function main() {
         submitSlot,
         _slotGap: order._slotGap,
         _poolCompetition: order._poolCompetition,
+        _poolCompetitionRaw: order._poolCompetitionRaw,
         _signalReceivedAt: order._signalReceivedAt,
         _signalToSubmitMs: signalToSubmitMs,
         _dumpTsToSubmitMs: dumpTsToSubmitMs,
@@ -833,7 +837,8 @@ async function main() {
           sellerTx: order.signature,
           notes:
             `executor rejected; reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'}, ` +
-            `slip=${buyResult.slippagePct ?? 'n/a'}, exact=${buyResult.exactReserveFence ?? false}`,
+            `slip=${buyResult.slippagePct ?? 'n/a'}, exact=${buyResult.exactReserveFence ?? false}, ` +
+            `feeMode=${buyResult.feeMode || 'n/a'}, reason=${buyResult.submitReason || 'n/a'}`,
           accepted: false,
           rejectReason: buyResult.error || 'BUY failed',
         });
@@ -850,6 +855,7 @@ async function main() {
         `mint=${order.mint} error="${buyResult.error || 'BUY failed'}" ` +
         `reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'} ` +
         `slip=${buyResult.slippagePct ?? 'n/a'} exact=${buyResult.exactReserveFence ?? false} ` +
+        `feeMode=${buyResult.feeMode || 'n/a'} reason="${buyResult.submitReason || 'n/a'}" ` +
         `dumpSlot=${order.slot || 0} submitSlot=${submitSlot || 0} slotGap=${order._slotGap ?? 'n/a'} ` +
         `signalToSubmit=${signalToSubmitMs ?? 'n/a'}ms dumpTsToSubmit=${dumpTsToSubmitMs ?? 'n/a'}ms ` +
         `getToken=${_t1 - _t0}ms preBuy=${_t2 - _t1}ms buy=${buyResult.latencyMs ?? 'n/a'}ms`,
