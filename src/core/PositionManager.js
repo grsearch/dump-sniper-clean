@@ -128,7 +128,43 @@ class PositionManager extends EventEmitter {
   }
 
   _isUnconfirmedLiveBuy(pos) {
-    return !!(pos && !pos.dryRun && !pos.reconciled);
+    return !!(pos && !pos.dryRun && (!pos.reconciled || !pos.buySlot || pos.buySlot <= 0));
+  }
+
+  _closeUnconfirmedBuyAsNotLanded(pos, triggerPrice, sellSignature = null, detail = 'unconfirmed_buy') {
+    if (!pos || !this.positions?.has(pos.positionId)) return false;
+    monitor.inc('PositionManager.unconfirmedBuyClosedFeeOnly', 1, 'PositionManager');
+    const feeSol = ((pos.sellFeeLamports || 0) + (pos.sellFeeLamports ? 5000 : 0)) / 1e9;
+    console.warn(
+      `[PositionManager] ⚠️ ${pos.symbol || pos.mint.slice(0, 6)} ${detail}: ` +
+      `buySlot=${pos.buySlot || 0} reconciled=${!!pos.reconciled}; closing fee-only as BUY_NOT_LANDED`,
+    );
+    this.tradeLogger.closePosition(pos.positionId, {
+      closedAt: Date.now(),
+      exitPrice: triggerPrice || pos.entryPrice,
+      exitSol: 0,
+      pnlSol: -feeSol,
+      pnlPct: feeSol > 0 ? -100 : 0,
+      exitReason: 'BUY_NOT_LANDED',
+      sellSignature,
+    });
+    this.tradeLogger.updateTradeStatus?.(pos.positionId, 'BUY', {
+      success: false,
+      error: detail,
+    });
+    this.positions.delete(pos.positionId);
+    this._removeByMint(pos.mint, pos.positionId);
+    if (this.executor?.poolStateCache) this.executor.poolStateCache.removeHot(pos.mint);
+    monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
+    this.emit('closed', {
+      ...pos,
+      exitPrice: triggerPrice || pos.entryPrice,
+      exitSol: 0,
+      pnlSol: -feeSol,
+      pnlPct: feeSol > 0 ? -100 : 0,
+      exitReason: 'BUY_NOT_LANDED',
+    });
+    return true;
   }
 
   // v3.17.40b: 加仓策略 — 自最近一笔买入价跌15%以上才允许加仓
@@ -372,8 +408,10 @@ class PositionManager extends EventEmitter {
         stabilizing: !row.peak_price || row.peak_price <= 0,
         reconciledAt: Date.now(),
         _stabilizeSamples: [],
-        // 恢复时已经 reconciled（DB 里的 entryPrice 已经是真实成交价）
-        reconciled: true,
+        // 恢复时只有真实 buy_slot>0 才能视为链上买入已确认。
+        // 历史上出现过 buy_slot=0 的幽灵仓位被恢复为 reconciled=true，
+        // 之后 TIMEOUT/TOKEN_GONE 被错误记成 -entrySol。
+        reconciled: !!row.dry_run || (row.buy_slot || 0) > 0,
         // v3.20: 从DB恢复买入前波动率
         preVol5m: row.pre_vol_5m_pct ?? null,
         rangeSupport: row.range_support ?? null,
@@ -387,6 +425,18 @@ class PositionManager extends EventEmitter {
       }
       this.positions.set(pos.positionId, pos);
       this._addByMint(pos.mint, pos.positionId);
+      if (this._isUnconfirmedLiveBuy(pos)) {
+        const timer = setTimeout(() => {
+          this._verifyRestoredUnconfirmedBuy(pos.positionId).catch((err) => {
+            monitor.recordError('PositionManager', err, {
+              phase: 'verify_restored_unconfirmed_buy',
+              mint: pos.mint,
+              positionId: pos.positionId,
+            });
+          });
+        }, 2000);
+        if (timer.unref) timer.unref();
+      }
       // v3.17.22: 恢复的持仓也加入 hotMints (isPosition=true → 500ms 刷新)
       const tokenInfo = this.tokenRegistry.getToken(pos.mint);
       if (tokenInfo?.pool_address && this.executor?.poolStateCache) {
@@ -402,6 +452,51 @@ class PositionManager extends EventEmitter {
     }
     monitor.set('PositionManager.openCount', this.positions.size, 'PositionManager');
     return restored;
+  }
+
+  async _verifyRestoredUnconfirmedBuy(positionId) {
+    const pos = this.positions.get(positionId);
+    if (!pos || !this._isUnconfirmedLiveBuy(pos)) return;
+
+    const walletBalance = await this.executor.getWalletTokenBalance(pos.mint).catch(() => 0);
+    if (walletBalance > 0) {
+      const recoveredSlot = pos.buySlot || pos.buySubmitSlot || pos.dumpSlot || (this.tickStream ? this.tickStream.latestSlot : 0) || 0;
+      pos.reconciled = true;
+      pos.reconciledAt = Date.now();
+      pos.stabilizing = true;
+      pos._stabilizeSamples = [];
+      if (walletBalance > 0) pos.tokenAmount = walletBalance;
+      if (recoveredSlot > 0) {
+        pos.buySlot = recoveredSlot;
+        pos.slotExitStartSlot = recoveredSlot;
+      }
+      console.warn(
+        `[PositionManager] ⚠️ restored unconfirmed BUY ${pos.symbol || pos.mint.slice(0, 6)} ` +
+        `but wallet has ${walletBalance} tokens; recovered buySlot=${pos.buySlot || 0}`,
+      );
+      this.tradeLogger.updateTradeStatus?.(positionId, 'BUY', {
+        success: true,
+        error: null,
+      });
+      this.tradeLogger.updatePositionEntry(positionId, {
+        entrySol: pos.entrySol,
+        entryPrice: pos.entryPrice,
+        tokenAmount: pos.tokenAmount,
+        buyFeeLamports: pos.buyFeeLamports || 0,
+        buySlot: pos.buySlot || null,
+        dumpSlot: pos.dumpSlot || null,
+      });
+      monitor.inc('PositionManager.restoredUnconfirmedBuyRecovered', 1, 'PositionManager');
+      return;
+    }
+
+    monitor.inc('PositionManager.restoredUnconfirmedBuyClosed', 1, 'PositionManager');
+    this._closeUnconfirmedBuyAsNotLanded(
+      pos,
+      pos.entryPrice,
+      null,
+      'restored_unconfirmed_buy_no_wallet_tokens',
+    );
   }
 
   /**
@@ -783,6 +878,19 @@ class PositionManager extends EventEmitter {
         // 用估算值 reconcile
         pos.reconciled = true;
         pos.reconciledAt = Date.now();
+        const recoveredSlot = result.slot || pos.buySubmitSlot || pos.dumpSlot || 0;
+        if (recoveredSlot > 0 && (!pos.buySlot || pos.buySlot <= 0)) {
+          pos.buySlot = recoveredSlot;
+          pos.slotExitStartSlot = recoveredSlot;
+          this.tradeLogger.updatePositionEntry(positionId, {
+            entrySol: pos.entrySol,
+            entryPrice: pos.entryPrice,
+            tokenAmount: pos.tokenAmount,
+            buyFeeLamports: pos.buyFeeLamports || 0,
+            buySlot: pos.buySlot,
+            dumpSlot: pos.dumpSlot,
+          });
+        }
         monitor.inc('PositionManager.buyReconcileFallback', 1, 'PositionManager');
         this.tradeLogger.updateTradeStatus?.(positionId, 'BUY', {
           success: true,
@@ -2342,6 +2450,16 @@ class PositionManager extends EventEmitter {
     // ============ 分支 B：提交成功，但还需等链上确认 ============
     // v3.17.40: 如果卖出 SOL ≈ 0，说明代币已被其他仓位卖光，直接关闭
     if (realSolOut !== null && realSolOut < 0.0001) {
+      if (this._isUnconfirmedLiveBuy(pos)) {
+        monitor.inc('PositionManager.sellAbandoned_unconfirmedBuyZeroOut', 1, 'PositionManager');
+        this._closeUnconfirmedBuyAsNotLanded(
+          pos,
+          realExitPrice,
+          sellResult.signature,
+          'unconfirmed_buy_zero_out',
+        );
+        return;
+      }
       monitor.inc('PositionManager.sellAbandoned_zeroOut', 1, 'PositionManager');
       console.warn(
         `[PositionManager] 🚫 SELL zero-out ${pos.symbol || pos.mint.slice(0, 6)}: ` +
