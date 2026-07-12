@@ -417,7 +417,7 @@ class PositionManager extends EventEmitter {
    * @param {string} p.signature
    * @param {number} [p.buyFeeLamports] - BUY tx 的 priority fee + base fee (lamports)
    */
-  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySubmitMode = null, buySlot, buySubmitSlot = 0, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
+  registerOpen({ positionId, mint, symbol, entrySol, entryPrice, tokenAmount, dryRun, signature, buyFeeLamports, buySubmitMode = null, buyFeeMode = null, buyFeeSource = null, buySubmitReason = null, buySlippagePct = null, buySignalToSubmitMs = null, buyStateLatencyMs = null, buyBuildLatencyMs = null, buySendLatencyMs = null, buySlot, buySubmitSlot = 0, dumpSlot, entryFdv, entryPoolSol, entryLiquidity, sellCount10s, totalSellSol10s, mintAgeAtBuySec, rsiPreDump, rsi1sPreDump, rsi30sPreDump, isEmaStrategy = false, isAddOn = false }) {
     const pid = positionId || crypto.randomUUID();
     const pos = {
       positionId: pid,
@@ -431,6 +431,14 @@ class PositionManager extends EventEmitter {
       buySignature: signature,
       buyFeeLamports: buyFeeLamports || 0,  // v3.4: 真实成本
       buySubmitMode: buySubmitMode || null,
+      buyFeeMode: buyFeeMode || null,
+      buyFeeSource: buyFeeSource || null,
+      buySubmitReason: buySubmitReason || null,
+      buySlippagePct,
+      buySignalToSubmitMs,
+      buyStateLatencyMs,
+      buyBuildLatencyMs,
+      buySendLatencyMs,
       sellFeeLamports: 0,                    // 卖出时累加（包括所有重试的 fee）
       buySlot: buySlot || 0,                // real BUY landing slot; filled by reconcile
       buySubmitSlot: buySubmitSlot || 0,    // pre-submit slot; never persisted as real buy_slot
@@ -632,6 +640,7 @@ class PositionManager extends EventEmitter {
    * 解决 BUY 实际花费 ≠ 配置 sizeSol 的问题（典型偏差 5-15%）
    */
   async _reconcileBuyAsync(positionId, mint, signature) {
+    const reconcileStartAt = Date.now();
     // v3.7: 等 1 秒让 tx 落链（BUY 通常 400-800ms 落链，1s 是合理初始延迟）
     await new Promise((r) => setTimeout(r, 1000));
 
@@ -689,6 +698,15 @@ class PositionManager extends EventEmitter {
         success: false,
         error: errMsg,
       });
+      console.log(
+        `[BUY_DIAG] CHAIN_FAILED ${pos.symbol || mint.slice(0, 6)} ` +
+        `mint=${mint} sig=${signature} error="${errMsg}" exitReason=${exitReason} feeSol=${feeSol.toFixed(6)} ` +
+        `feeMode=${pos.buyFeeMode || 'n/a'} feeSrc=${pos.buyFeeSource || 'n/a'} submit=${pos.buySubmitMode || 'n/a'}/${pos.buySubmitReason || 'n/a'} ` +
+        `slip=${pos.buySlippagePct ?? 'n/a'} dumpSlot=${pos.dumpSlot || 0} submitSlot=${pos.buySubmitSlot || 0} buySlot=0 ` +
+        `submitGap=${pos.dumpSlot && pos.buySubmitSlot ? pos.buySubmitSlot - pos.dumpSlot : 'n/a'} ` +
+        `signalToSubmit=${pos.buySignalToSubmitMs ?? 'n/a'}ms state=${pos.buyStateLatencyMs ?? 'n/a'}ms ` +
+        `build=${pos.buyBuildLatencyMs ?? 'n/a'}ms send=${pos.buySendLatencyMs ?? 'n/a'}ms confirm=${Date.now() - reconcileStartAt}ms`,
+      );
 
       this.positions.delete(positionId);
       this._removeByMint(mint, positionId);
@@ -880,6 +898,16 @@ class PositionManager extends EventEmitter {
       buySlot: pos.buySlot,
       dumpSlot: pos.dumpSlot,
     });
+    console.log(
+      `[BUY_DIAG] LANDED ${pos.symbol || mint.slice(0, 6)} ` +
+      `mint=${mint} sig=${signature} realLag=${pos.buySlot && pos.dumpSlot ? pos.buySlot - pos.dumpSlot : 'n/a'} ` +
+      `dumpSlot=${pos.dumpSlot || 0} submitSlot=${pos.buySubmitSlot || 0} buySlot=${pos.buySlot || 0} ` +
+      `submitGap=${pos.dumpSlot && pos.buySubmitSlot ? pos.buySubmitSlot - pos.dumpSlot : 'n/a'} ` +
+      `feeMode=${pos.buyFeeMode || 'n/a'} feeSrc=${pos.buyFeeSource || 'n/a'} submit=${pos.buySubmitMode || 'n/a'}/${pos.buySubmitReason || 'n/a'} ` +
+      `slip=${pos.buySlippagePct ?? 'n/a'} signalToSubmit=${pos.buySignalToSubmitMs ?? 'n/a'}ms ` +
+      `state=${pos.buyStateLatencyMs ?? 'n/a'}ms build=${pos.buyBuildLatencyMs ?? 'n/a'}ms send=${pos.buySendLatencyMs ?? 'n/a'}ms ` +
+      `confirm=${Date.now() - reconcileStartAt}ms entrySol=${realSolSpent.toFixed(4)} drift=${drift.toFixed(2)}%`,
+    );
     const maxReconcileDriftPct = parseFloat(process.env.MAX_RECONCILE_DRIFT_PCT || '-40');
     if (maxReconcileDriftPct < 0 && drift < maxReconcileDriftPct) {
       const fillRatio = oldEntrySol > 0 ? realSolSpent / oldEntrySol : 1;

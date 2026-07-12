@@ -178,6 +178,7 @@ class Executor {
     this.buySubmitMode = (process.env.BUY_SUBMIT_MODE || 'jito_bundle_only').toLowerCase();
     this.buySignalFeeTiering = (process.env.BUY_SIGNAL_FEE_TIERING ?? 'true').toLowerCase() === 'true';
     this.lowConfidenceBuyFeeLamports = parseInt(process.env.LOW_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS || '300000', 10);
+    this.highConfidenceBuyFeeLamports = parseInt(process.env.HIGH_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS || '9000000', 10);
     this.jitoBlockEngineUrl = (process.env.JITO_BLOCK_ENGINE_URL || 'https://mainnet.block-engine.jito.wtf').replace(/\/+$/, '');
     this.jitoBundleTimeoutMs = parseInt(process.env.JITO_BUNDLE_TIMEOUT_MS || '1200', 10);
     this.jitoBundleTipLamports = parseInt(process.env.JITO_BUNDLE_TIP_LAMPORTS || process.env.JITO_TIP_LAMPORTS || '1000000', 10);
@@ -996,7 +997,22 @@ class Executor {
       const microLamportsPerCu = Math.floor((totalLamports * 1_000_000) / this.computeUnitLimit);
       return { totalLamports, microLamportsPerCu, source: 'low_confidence' };
     }
-    return this.feeOracle.estimate(side);
+    const normal = this.feeOracle.estimate(side);
+    if (side === 'BUY' && feeMode === 'high_confidence') {
+      const floorLamports = Math.max(0, Number(this.highConfidenceBuyFeeLamports) || 0);
+      if (floorLamports > normal.totalLamports) {
+        return {
+          totalLamports: floorLamports,
+          microLamportsPerCu: Math.floor((floorLamports * 1_000_000) / this.computeUnitLimit),
+          source: `high_confidence_floor:${normal.source}`,
+        };
+      }
+      return {
+        ...normal,
+        source: `high_confidence:${normal.source}`,
+      };
+    }
+    return normal;
   }
 
   _classifyBuySubmission(order, { slippagePct, exactReserveFence }) {
@@ -1016,11 +1032,17 @@ class Executor {
         feeMode = 'low_confidence';
         reason = `low_confidence:${confidence.reason},slip=${slippagePct}`;
       } else {
+        feeMode = 'high_confidence';
         reason = `high_confidence:${confidence.reason},slip=${slippagePct}`;
       }
     }
 
-    return { submitMode, feeMode, reason };
+    return {
+      submitMode,
+      feeMode,
+      reason,
+      confidence: feeMode === 'low_confidence' ? 'low' : (feeMode === 'high_confidence' ? 'high' : 'normal'),
+    };
   }
 
   _classifyFirstBuyConfidence(order, { exactReserveFence }) {
@@ -1484,6 +1506,28 @@ class Executor {
           }ms, reserve=${order.exactReserveSource || 'none'} slip=${slippagePct}% ` +
           `fee=${feeInfo.totalLamports}L ${feeInfo.source} submit=${submitPlan.submitMode}/${submitPlan.reason})`,
       );
+      {
+        const competition = order?._poolCompetition || {};
+        const signalToSubmitMs = Number.isFinite(order?._signalToSubmitMs)
+          ? order._signalToSubmitMs
+          : (order?._signalReceivedAt ? Date.now() - order._signalReceivedAt : null);
+        const dumpTsToSubmitMs = Number.isFinite(order?._dumpTsToSubmitMs)
+          ? order._dumpTsToSubmitMs
+          : (order?.ts ? Date.now() - order.ts : null);
+        console.log(
+          `[BUY_DIAG] SUBMITTED ${order.symbol || order.mint.slice(0, 6)} ` +
+          `mint=${order.mint} sig=${sig} ` +
+          `confidence=${submitPlan.confidence} feeMode=${submitPlan.feeMode} fee=${feeInfo.totalLamports}L feeSrc=${feeInfo.source} ` +
+          `slip=${slippagePct}% reserve=${order.exactReserveSource || 'none'} exact=${!!exactReserveFence} ` +
+          `dumpSlot=${order.slot || 0} submitSlot=${this._latestBuySlot || 0} slotGap=${order._slotGap ?? 'n/a'} ` +
+          `sellSol=${Number(order.sellSol || 0).toFixed(2)} impact=${Number(order.priceImpactPct || 0).toFixed(2)} ` +
+          `signalToSubmit=${signalToSubmitMs ?? 'n/a'}ms dumpTsToSubmit=${dumpTsToSubmitMs ?? 'n/a'}ms ` +
+          `getToken=${order._tokenLookupMs ?? 'n/a'}ms preBuy=${order._preBuyMs ?? 'n/a'}ms ` +
+          `state=${stateLatencyMs}ms build=${buildLatencyMs}ms send=${sendLatencyMs}ms total=${Date.now() - t0}ms ` +
+          `compBuys=${competition.buyCount ?? 'n/a'} compSol=${Number(competition.buySol || 0).toFixed(3)} ` +
+          `compMax=${Number(competition.maxSingleBuySol || 0).toFixed(3)} submit=${submitPlan.submitMode}/${submitPlan.reason}`,
+        );
+      }
 
       return {
         success: true,
@@ -1496,6 +1540,9 @@ class Executor {
         buildLatencyMs,
         priorityFeeLamports: feeInfo.totalLamports,
         priorityFeeSource: feeInfo.source,
+        feeMode: submitPlan.feeMode,
+        submitReason: submitPlan.reason,
+        confidence: submitPlan.confidence,
         submitMode: submitPlan.submitMode,
         sendLatencyMs,
         exactReserveFence,

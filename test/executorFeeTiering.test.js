@@ -13,6 +13,16 @@ function makeExecutor() {
   const executor = Object.create(Executor.prototype);
   executor.buySubmitMode = 'race';
   executor.buySignalFeeTiering = true;
+  executor.computeUnitLimit = 250_000;
+  executor.lowConfidenceBuyFeeLamports = 300_000;
+  executor.highConfidenceBuyFeeLamports = 9_000_000;
+  executor.feeOracle = {
+    estimate: () => ({
+      totalLamports: 5_000_000,
+      microLamportsPerCu: 20_000_000,
+      source: 'dynamic',
+    }),
+  };
   return executor;
 }
 
@@ -31,7 +41,7 @@ function withStrategy(overrides, fn) {
   }
 }
 
-test('fee tiering keeps ideal first-buy candidates at normal fee even with 2-3% slippage', () => {
+test('fee tiering promotes ideal first-buy candidates to high-confidence fee even with 2-3% slippage', () => {
   withStrategy({ firstBuyLowCompetitionMaxSellSol: 20 }, () => {
     const executor = makeExecutor();
     const plan = executor._classifyBuySubmission({
@@ -45,7 +55,7 @@ test('fee tiering keeps ideal first-buy candidates at normal fee even with 2-3% 
     });
 
     assert.equal(plan.submitMode, 'race');
-    assert.equal(plan.feeMode, 'normal');
+    assert.equal(plan.feeMode, 'high_confidence');
     assert.match(plan.reason, /high_confidence/);
   });
 });
@@ -90,4 +100,21 @@ test('fee tiering downgrades risky first-buy candidates to low fee', () => {
     assert.equal(staleSlot.feeMode, 'low_confidence');
     assert.match(staleSlot.reason, /slot_gap=1/);
   });
+});
+
+test('high-confidence priority fee applies a configurable floor', () => {
+  const executor = makeExecutor();
+
+  const high = executor._estimatePriorityFee('BUY', 'high_confidence');
+  assert.equal(high.totalLamports, 9_000_000);
+  assert.equal(high.microLamportsPerCu, 36_000_000);
+  assert.match(high.source, /high_confidence_floor/);
+
+  const low = executor._estimatePriorityFee('BUY', 'low_confidence');
+  assert.equal(low.totalLamports, 300_000);
+  assert.equal(low.source, 'low_confidence');
+
+  const normal = executor._estimatePriorityFee('BUY', 'normal');
+  assert.equal(normal.totalLamports, 5_000_000);
+  assert.equal(normal.source, 'dynamic');
 });
