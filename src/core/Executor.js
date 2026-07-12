@@ -1055,6 +1055,37 @@ class Executor {
       : (order?.slot && order?.submitSlot ? Number(order.submitSlot) - Number(order.slot) : null);
     if (slotGap !== null && slotGap !== 0) return { high: false, reason: `slot_gap=${slotGap}` };
 
+    const strictNeedle = config.strategy.firstBuyNeedleMode !== 'off';
+    const rawCompetition = order?._poolCompetitionRaw || null;
+    if (strictNeedle && rawCompetition) {
+      const rawBuyCount = Number(rawCompetition.buyCount) || 0;
+      const rawBuySol = Number(rawCompetition.buySol) || 0;
+      const rawMaxSingleBuySol = Number(rawCompetition.maxSingleBuySol) || 0;
+      const maxRawBuys = Number(config.strategy.firstBuyStrictMaxRawCompetingBuys);
+      if (Number.isFinite(maxRawBuys) && maxRawBuys >= 0 && rawBuyCount > maxRawBuys) {
+        return {
+          high: false,
+          reason: `raw_competition=buys:${rawBuyCount}>${maxRawBuys},sol:${rawBuySol.toFixed(3)},max:${rawMaxSingleBuySol.toFixed(3)}`,
+        };
+      }
+      const maxRawSol = Number(config.strategy.firstBuyStrictMaxRawCompetingSol);
+      if (Number.isFinite(maxRawSol) && maxRawSol >= 0 && rawBuySol > maxRawSol) {
+        return {
+          high: false,
+          reason: `raw_competition=sol:${rawBuySol.toFixed(3)}>${maxRawSol},buys:${rawBuyCount},max:${rawMaxSingleBuySol.toFixed(3)}`,
+        };
+      }
+      const maxRawSingle = Number(config.strategy.firstBuyStrictMaxSingleCompetingBuySol);
+      if (Number.isFinite(maxRawSingle) && maxRawSingle >= 0 && rawMaxSingleBuySol > maxRawSingle) {
+        return {
+          high: false,
+          reason: `raw_competition=max:${rawMaxSingleBuySol.toFixed(3)}>${maxRawSingle},buys:${rawBuyCount},sol:${rawBuySol.toFixed(3)}`,
+        };
+      }
+    } else if (strictNeedle && !rawCompetition) {
+      return { high: false, reason: 'raw_competition=unknown' };
+    }
+
     const competition = order?._poolCompetition || null;
     if (!competition) return { high: false, reason: 'competition=unknown' };
 
@@ -1069,18 +1100,38 @@ class Executor {
     }
 
     const sellSol = Number(order?.sellSol) || 0;
+    const strictMaxSellSol = Number(config.strategy.firstBuyStrictMaxSellSol);
+    if (strictNeedle && Number.isFinite(strictMaxSellSol) && strictMaxSellSol > 0 && sellSol > strictMaxSellSol) {
+      return { high: false, reason: `strict_large_sell:${sellSol.toFixed(2)}>${strictMaxSellSol}` };
+    }
+    const signalAgeMs = Number.isFinite(order?._dumpTsToSubmitMs)
+      ? Number(order._dumpTsToSubmitMs)
+      : (order?.ts ? Date.now() - Number(order.ts) : null);
+    const maxSignalAgeMs = Number(config.strategy.firstBuyStrictMaxSignalAgeMs);
+    if (
+      strictNeedle &&
+      signalAgeMs !== null &&
+      Number.isFinite(signalAgeMs) &&
+      Number.isFinite(maxSignalAgeMs) &&
+      maxSignalAgeMs > 0 &&
+      signalAgeMs > maxSignalAgeMs
+    ) {
+      return { high: false, reason: `signal_age:${Math.round(signalAgeMs)}ms>${maxSignalAgeMs}ms` };
+    }
+
     const maxSellSol = Number(config.strategy.firstBuyLowCompetitionMaxSellSol);
     if (Number.isFinite(maxSellSol) && maxSellSol > 0 && sellSol > maxSellSol) {
       return { high: false, reason: `large_sell:${sellSol.toFixed(2)}>${maxSellSol}` };
     }
 
-    return { high: true, reason: `needle:reserve=${reserveSource},slot_gap=0,no_competition` };
+    return { high: true, reason: `needle:reserve=${reserveSource},slot_gap=0,no_competition,strict=${strictNeedle}` };
   }
 
   _resolveFirstBuySlippageBps(order) {
     const baseBps = Number(config.strategy.firstBuySlippageBps) || 0;
-    if (!config.strategy.firstBuyOnly || !config.strategy.firstBuyDynamicSlippage) return baseBps;
-    if (order?.exactReserveSource !== 'tx_post_balances') return baseBps;
+    if (!config.strategy.firstBuyOnly) return baseBps;
+    if (!config.strategy.firstBuyDynamicSlippage) return this._capStrictNeedleSlippageBps(baseBps);
+    if (order?.exactReserveSource !== 'tx_post_balances') return this._capStrictNeedleSlippageBps(baseBps);
 
     const lowCompetitionBps = Number(config.strategy.firstBuyLowCompetitionSlippageBps) || 0;
     if (lowCompetitionBps <= baseBps) return baseBps;
@@ -1100,9 +1151,26 @@ class Executor {
 
     if (slotGap === 0 && noKnownCompetition && sellSizeOk) {
       monitor.inc('Executor.firstBuyDynamicSlippage', 1, 'Executor');
-      return lowCompetitionBps;
+      return this._capStrictNeedleSlippageBps(lowCompetitionBps);
     }
-    return baseBps;
+    return this._capStrictNeedleSlippageBps(baseBps);
+  }
+
+  _capStrictNeedleSlippageBps(bps) {
+    const value = Number(bps) || 0;
+    if (config.strategy.firstBuyNeedleMode === 'off') return value;
+    const cap = Number(config.strategy.firstBuyStrictMaxSlippageBps);
+    if (!Number.isFinite(cap) || cap <= 0) return value;
+    if (value > cap) {
+      monitor.inc('Executor.firstBuyStrictSlippageCapped', 1, 'Executor');
+      return cap;
+    }
+    return value;
+  }
+
+  _shouldSkipLowConfidenceBuy(submitPlan) {
+    if (!submitPlan || submitPlan.feeMode !== 'low_confidence') return false;
+    return config.strategy.lowConfidenceBuyAction === 'skip';
   }
 
   /**
@@ -1478,6 +1546,22 @@ class Executor {
       // 3. 构造、签名、提交
       // v3.32: 传入 baseTokenProgram 支持 Token-2022 币
       const submitPlan = this._classifyBuySubmission(order, { slippagePct, exactReserveFence });
+      if (this._shouldSkipLowConfidenceBuy(submitPlan)) {
+        monitor.inc('Executor.lowConfidenceBuySkipped', 1, 'Executor');
+        return {
+          success: false,
+          error: `low_confidence_skipped: ${submitPlan.reason}`,
+          lowConfidenceSkipped: true,
+          firstBuyOnlyRejected: true,
+          latencyMs: Date.now() - t0,
+          exactReserveFence,
+          exactReserveSource: order.exactReserveSource || null,
+          slippagePct,
+          feeMode: submitPlan.feeMode,
+          submitReason: submitPlan.reason,
+          confidence: submitPlan.confidence,
+        };
+      }
       const { serialized, feeInfo } = await this._buildAndSignTx(
         swapIxs,
         'BUY',

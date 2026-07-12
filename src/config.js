@@ -185,11 +185,23 @@ const config = {
     firstBuyMaxCompetingBuys: parseInt(process.env.FIRST_BUY_MAX_COMPETING_BUYS || '3', 10),
     firstBuyMaxCompetingSol: parseFloat(process.env.FIRST_BUY_MAX_COMPETING_SOL || '2'),
     firstBuyMaxSingleCompetingBuySol: parseFloat(process.env.FIRST_BUY_MAX_SINGLE_COMPETING_BUY_SOL || '3'),
+    // Strict needle mode: only spend high priority fee on the cleanest same-slot
+    // first-buy candidates. Everything else can be skipped or sent with low fee.
+    firstBuyNeedleMode: (process.env.FIRST_BUY_NEEDLE_MODE || 'strict').toLowerCase(),
+    firstBuyStrictMaxRawCompetingBuys: parseInt(process.env.FIRST_BUY_STRICT_MAX_RAW_COMPETING_BUYS || '0', 10),
+    firstBuyStrictMaxRawCompetingSol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_RAW_COMPETING_SOL || '0'),
+    firstBuyStrictMaxSingleCompetingBuySol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_SINGLE_COMPETING_BUY_SOL || '0'),
+    firstBuyStrictMaxSellSol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_SELL_SOL || '15'),
+    firstBuyStrictMaxSignalAgeMs: parseInt(process.env.FIRST_BUY_STRICT_MAX_SIGNAL_AGE_MS || '800', 10),
+    firstBuyStrictMaxSlippageBps: parseInt(process.env.FIRST_BUY_STRICT_MAX_SLIPPAGE_BPS || '300', 10),
     // Keep the default tight, and only widen for known low-competition same-slot
     // entries. This is not a global high-slippage mode.
     firstBuyDynamicSlippage: (process.env.FIRST_BUY_DYNAMIC_SLIPPAGE ?? 'true').toLowerCase() === 'true',
     firstBuyLowCompetitionSlippageBps: parseInt(process.env.FIRST_BUY_LOW_COMPETITION_SLIPPAGE_BPS || '300', 10),
     firstBuyLowCompetitionMaxSellSol: parseFloat(process.env.FIRST_BUY_LOW_COMPETITION_MAX_SELL_SOL || '20'),
+    // skip = do not submit low-confidence BUYs at all (saves fee);
+    // low_fee = still try them with LOW_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS.
+    lowConfidenceBuyAction: (process.env.LOW_CONFIDENCE_BUY_ACTION || 'skip').toLowerCase(),
     // Fee-burn guard for repeated on-chain Custom:6004 / ExceededSlippage on a
     // single mint. This is intentionally separate from normal rebuy cooldowns.
     buy6004CooldownAfter: parseInt(process.env.BUY_6004_COOLDOWN_AFTER || '2', 10),
