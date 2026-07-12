@@ -789,11 +789,13 @@ async function main() {
       tokenAmount: buyResult.tokenAmount,
       price: buyResult.price,
       signature: buyResult.signature,
-      success: buyResult.success,
+      // LIVE 买入这里只代表“已提交”，不代表链上成交。
+      // 真正 success 会由 PositionManager._reconcileBuyAsync 在链上确认后回写。
+      success: config.DRY_RUN ? buyResult.success : false,
       dryRun: config.DRY_RUN,
       reason: order.reason,
       latencyMs: buyResult.latencyMs,
-      error: buyResult.error,
+      error: (buyResult.success && !config.DRY_RUN) ? 'submitted_pending_confirmation' : buyResult.error,
     });
 
     if (!buyResult.success) {
