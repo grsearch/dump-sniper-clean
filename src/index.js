@@ -658,6 +658,12 @@ async function main() {
         const reason =
           `buy submit slot gap too large: dump@${order.slot}, submit@${submitSlot}, gap=${submitGap} (>${maxBuySubmitSlotGap})`;
         console.warn(`[main] BUY rejected ${order.symbol || order.mint.slice(0, 6)}: ${reason}`);
+        console.log(
+          `[BUY_DIAG] PRE_SUBMIT_REJECT ${order.symbol || order.mint.slice(0, 6)} ` +
+          `mint=${order.mint} stage=slot_gap reason="${reason}" ` +
+          `dumpSlot=${order.slot || 0} submitSlot=${submitSlot || 0} slotGap=${submitGap} ` +
+          `signalToReject=${order._signalReceivedAt ? Date.now() - order._signalReceivedAt : 'n/a'}ms`,
+        );
         try {
           tradeLogger.logSignal({
             ts: Date.now(),
@@ -687,6 +693,15 @@ async function main() {
     if (!competitionCheck.ok) {
       const reason = competitionCheck.reason || 'same-slot competition';
       console.warn(`[main] BUY rejected ${order.symbol || order.mint.slice(0, 6)}: ${reason}`);
+      const stats = competitionCheck.stats || {};
+      console.log(
+        `[BUY_DIAG] PRE_SUBMIT_REJECT ${order.symbol || order.mint.slice(0, 6)} ` +
+        `mint=${order.mint} stage=competition reason="${reason}" ` +
+        `dumpSlot=${order.slot || 0} submitSlot=${submitSlot || 0} slotGap=${order._slotGap ?? 'n/a'} ` +
+        `compBuys=${stats.buyCount ?? 'n/a'} compSol=${Number(stats.buySol || 0).toFixed(3)} ` +
+        `compMax=${Number(stats.maxSingleBuySol || 0).toFixed(3)} ` +
+        `signalToReject=${order._signalReceivedAt ? Date.now() - order._signalReceivedAt : 'n/a'}ms`,
+      );
       try {
         tradeLogger.logSignal({
           ts: Date.now(),
@@ -731,6 +746,8 @@ async function main() {
     }
 
     const _t2 = Date.now();
+    const signalToSubmitMs = order._signalReceivedAt ? _t2 - order._signalReceivedAt : null;
+    const dumpTsToSubmitMs = order.ts ? _t2 - order.ts : null;
     let buyResult;
     try {
       buyResult = await executor.buy({
@@ -750,6 +767,11 @@ async function main() {
         submitSlot,
         _slotGap: order._slotGap,
         _poolCompetition: order._poolCompetition,
+        _signalReceivedAt: order._signalReceivedAt,
+        _signalToSubmitMs: signalToSubmitMs,
+        _dumpTsToSubmitMs: dumpTsToSubmitMs,
+        _tokenLookupMs: _t1 - _t0,
+        _preBuyMs: _t2 - _t1,
       });
     } finally {
       signalEngine.markBuyDone(order.mint);
@@ -823,6 +845,15 @@ async function main() {
         `(reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'} ` +
         `slip=${buyResult.slippagePct ?? 'n/a'} exact=${buyResult.exactReserveFence ?? false})`,
       );
+      console.log(
+        `[BUY_DIAG] EXECUTOR_REJECT ${order.symbol || order.mint.slice(0, 6)} ` +
+        `mint=${order.mint} error="${buyResult.error || 'BUY failed'}" ` +
+        `reserve=${buyResult.exactReserveSource || order.exactReserveSource || 'none'} ` +
+        `slip=${buyResult.slippagePct ?? 'n/a'} exact=${buyResult.exactReserveFence ?? false} ` +
+        `dumpSlot=${order.slot || 0} submitSlot=${submitSlot || 0} slotGap=${order._slotGap ?? 'n/a'} ` +
+        `signalToSubmit=${signalToSubmitMs ?? 'n/a'}ms dumpTsToSubmit=${dumpTsToSubmitMs ?? 'n/a'}ms ` +
+        `getToken=${_t1 - _t0}ms preBuy=${_t2 - _t1}ms buy=${buyResult.latencyMs ?? 'n/a'}ms`,
+      );
       // v3.26: pool dead/low-liquidity/mint-mismatch → 24h 冷却，防止同币反复浪费 fee
       if (buyResult.poolDead || buyResult.poolLowLiquidity || buyResult.poolMintMismatch) {
         const cooldownMs = parseInt(process.env.POOL_FAIL_REBUY_COOLDOWN_MS || '86400000', 10);
@@ -862,6 +893,14 @@ async function main() {
       signature: buyResult.signature,
       buyFeeLamports: buyResult.priorityFeeLamports || 0,  // v3.4: 用于真实 PnL
       buySubmitMode: buyResult.submitMode || null,
+      buyFeeMode: buyResult.feeMode || null,
+      buyFeeSource: buyResult.priorityFeeSource || null,
+      buySubmitReason: buyResult.submitReason || null,
+      buySlippagePct: buyResult.slippagePct ?? null,
+      buySignalToSubmitMs: signalToSubmitMs,
+      buyStateLatencyMs: buyResult.stateLatencyMs ?? null,
+      buyBuildLatencyMs: buyResult.buildLatencyMs ?? null,
+      buySendLatencyMs: buyResult.sendLatencyMs ?? null,
       buySlot: buyResult.buySlot || 0,  // real landing slot; filled after reconcile, not pre-submit
       buySubmitSlot: buyResult.submittedSlot || 0, // temporary in-memory anchor for SLOT_EXIT
       dumpSlot: order.slot || 0,        // v3.17.19: 砸单的 slot,用于算 BUY 落链领先几个 slot
