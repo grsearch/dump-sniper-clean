@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 
 const {
   hasVerifiedExactReserves,
+  hasUsableFirstBuyReserves,
   normalizeRawTokenAmount,
   prepareBuyQuoteState,
 } = require('../src/utils/firstBuyOnly');
@@ -117,6 +118,34 @@ test('verified exact reserves require tx post-balance source and both raw reserv
     poolBaseAfterRaw: '10',
     exactReserveSource: 'tx_post_balances',
   }), false);
+});
+
+test('speed-first mode can use predicted reserves without marking them exact', () => {
+  const cachedState = { pool: {} };
+  const order = {
+    poolBaseAfterRaw: '123',
+    poolQuoteAfterRaw: '456',
+    exactReserveSource: 'predicted_reserve',
+  };
+
+  assert.equal(hasVerifiedExactReserves(order), false);
+  assert.equal(hasUsableFirstBuyReserves(order), false);
+  assert.equal(hasUsableFirstBuyReserves(order, { allowPredicted: true }), true);
+
+  const result = prepareBuyQuoteState({
+    swapState: cachedState,
+    order,
+    firstBuyOnly: true,
+    buySlippageBps: 2500,
+    firstBuySlippageBps: 300,
+    allowPredictedReserves: true,
+  });
+
+  assert.notEqual(result.swapState, cachedState);
+  assert.equal(result.swapState.poolBaseAmount.toString(), '123');
+  assert.equal(result.swapState.poolQuoteAmount.toString(), '456');
+  assert.equal(result.slippagePct, 3);
+  assert.equal(result.exactReserveFence, true);
 });
 
 test('normal mode preserves cached state and configured slippage', () => {

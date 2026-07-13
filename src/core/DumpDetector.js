@@ -64,6 +64,35 @@ function safeTokenAmount(ui) {
   return Number.isFinite(v) ? v : 0;
 }
 
+function bnLikeToBigInt(value) {
+  if (value == null) return null;
+  try {
+    return BigInt(value.toString());
+  } catch (_) {
+    return null;
+  }
+}
+
+function uiAmountToRawString(amount, decimals) {
+  const n = Number(amount);
+  const d = Number(decimals);
+  if (!Number.isFinite(n) || n <= 0 || !Number.isInteger(d) || d < 0 || d > 12) return null;
+  const scale = Math.pow(10, d);
+  const raw = BigInt(Math.max(0, Math.round(n * scale)));
+  return raw > 0n ? raw.toString() : null;
+}
+
+function solToLamportsRawString(sol) {
+  return uiAmountToRawString(sol, 9);
+}
+
+function addUiToRawString(rawLike, deltaUi, decimals) {
+  const raw = bnLikeToBigInt(rawLike);
+  const deltaRaw = uiAmountToRawString(deltaUi, decimals);
+  if (raw == null || deltaRaw == null) return null;
+  return (raw + BigInt(deltaRaw)).toString();
+}
+
 class DumpDetector extends EventEmitter {
   constructor(tokenRegistry) {
     super();
@@ -823,10 +852,10 @@ class DumpDetector extends EventEmitter {
       ? allKeys.findIndex((k) => k === poolQuoteVault)
       : -1;
     const poolBaseAfterRaw = this._findRawBalance(postBalances, baseVaultIdx, baseMint);
-    const poolQuoteAfterRaw = quoteVaultIdx >= 0
+    let poolQuoteAfterRaw = quoteVaultIdx >= 0
       ? this._findRawBalance(postBalances, quoteVaultIdx, WSOL_MINT)
       : null;
-    const exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
+    let exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
       ? 'tx_post_balances'
       : (poolBaseAfterRaw ? 'tx_post_balances_base_only' : null);
 
@@ -887,6 +916,14 @@ class DumpDetector extends EventEmitter {
         priceAfter = qAfter / baseAfter;
         priceChangePct = ((priceAfter - priceBefore) / priceBefore) * 100;
         poolQuoteAfter = qAfter;
+        if (exactReserveSource !== 'tx_post_balances' && poolBaseAfterRaw && !poolQuoteAfterRaw) {
+          const predictedQuoteRaw = solToLamportsRawString(qAfter);
+          if (predictedQuoteRaw) {
+            poolQuoteAfterRaw = predictedQuoteRaw;
+            exactReserveSource = 'predicted_reserve';
+            monitor.inc('DumpDetector.predictedReserveBuilt', 1, 'DumpDetector');
+          }
+        }
       } else {
         priceBefore = 1;
         priceAfter = baseBefore / baseAfter;
@@ -1216,6 +1253,8 @@ class DumpDetector extends EventEmitter {
     const tokensSold = bestTokensSold;
     const side = 'SELL';
     let exactReserveSource = null;
+    let poolBaseAfterRaw = null;
+    let poolQuoteAfterRaw = null;
 
     // 3. 算 quoteAmount
     let quoteAmount = 0;
@@ -1254,7 +1293,14 @@ class DumpDetector extends EventEmitter {
         priceAfter = qAfter / bAfter;
         priceChangePct = ((priceAfter - priceBefore) / priceBefore) * 100;
         poolQuoteAfter = qAfter;
-        exactReserveSource = 'cache_estimate';
+        poolBaseAfterRaw = addUiToRawString(poolState.poolBaseAmount, tokensSold, baseDecimals);
+        poolQuoteAfterRaw = solToLamportsRawString(qAfter);
+        exactReserveSource = (poolBaseAfterRaw && poolQuoteAfterRaw)
+          ? 'predicted_reserve'
+          : 'cache_estimate';
+        if (exactReserveSource === 'predicted_reserve') {
+          monitor.inc('DumpDetector.predictedReserveBuilt', 1, 'DumpDetector');
+        }
       }
     }
 
@@ -1311,6 +1357,8 @@ class DumpDetector extends EventEmitter {
       poolQuoteVault: poolQuoteVault || null,
       poolQuoteAfter,
       poolBaseAfter: 0,
+      poolBaseAfterRaw,
+      poolQuoteAfterRaw,
       exactReserveSource,
       source: 'balance_only',
     };

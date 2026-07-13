@@ -41,7 +41,11 @@ const {
 
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { hasVerifiedExactReserves, prepareBuyQuoteState } = require('../utils/firstBuyOnly');
+const {
+  hasUsableFirstBuyReserves,
+  isPredictedReserveSource,
+  prepareBuyQuoteState,
+} = require('../utils/firstBuyOnly');
 
 // AllenHark Slipstream SDK (lazy load)
 let SlipstreamClient = null;
@@ -1045,10 +1049,19 @@ class Executor {
     };
   }
 
+  _allowPredictedFirstBuyReserves() {
+    return config.strategy.firstBuyReserveMode === 'speed_first';
+  }
+
   _classifyFirstBuyConfidence(order, { exactReserveFence }) {
     const reserveSource = order?.exactReserveSource || 'none';
-    const strictExact = exactReserveFence && reserveSource === 'tx_post_balances';
-    if (!strictExact) return { high: false, reason: `reserve=${reserveSource}` };
+    const usableReserve =
+      exactReserveFence &&
+      (
+        reserveSource === 'tx_post_balances' ||
+        (this._allowPredictedFirstBuyReserves() && isPredictedReserveSource(reserveSource))
+      );
+    if (!usableReserve) return { high: false, reason: `reserve=${reserveSource}` };
 
     const slotGap = Number.isFinite(order?._slotGap)
       ? Number(order._slotGap)
@@ -1131,6 +1144,10 @@ class Executor {
     const baseBps = Number(config.strategy.firstBuySlippageBps) || 0;
     if (!config.strategy.firstBuyOnly) return baseBps;
     if (!config.strategy.firstBuyDynamicSlippage) return this._capStrictNeedleSlippageBps(baseBps);
+    if (isPredictedReserveSource(order?.exactReserveSource)) {
+      const predictedBps = Number(config.strategy.firstBuyPredictedSlippageBps) || baseBps;
+      return this._capStrictNeedleSlippageBps(predictedBps);
+    }
     if (order?.exactReserveSource !== 'tx_post_balances') return this._capStrictNeedleSlippageBps(baseBps);
 
     const lowCompetitionBps = Number(config.strategy.firstBuyLowCompetitionSlippageBps) || 0;
@@ -1187,11 +1204,11 @@ class Executor {
     // ============ DRY_RUN ============
     if (this.dryRun) {
       if (config.strategy.firstBuyOnly) {
-        if (!hasVerifiedExactReserves(order)) {
+        if (!hasUsableFirstBuyReserves(order, { allowPredicted: this._allowPredictedFirstBuyReserves() })) {
           monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
           return {
             success: false,
-            error: 'first_buy_only: exact post-dump reserves not verified',
+            error: 'first_buy_only: usable post-dump reserves not verified',
             firstBuyOnlyRejected: true,
             latencyMs: Date.now() - t0,
           };
@@ -1332,11 +1349,14 @@ class Executor {
         }
       }
       if (!swapState) {
-        if (config.strategy.firstBuyOnly && !hasVerifiedExactReserves(order)) {
+        if (
+          config.strategy.firstBuyOnly &&
+          !hasUsableFirstBuyReserves(order, { allowPredicted: this._allowPredictedFirstBuyReserves() })
+        ) {
           monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');
           return {
             success: false,
-            error: 'first_buy_only: exact post-dump reserves not verified',
+            error: 'first_buy_only: usable post-dump reserves not verified',
             firstBuyOnlyRejected: true,
             latencyMs: Date.now() - t0,
           };
@@ -1440,6 +1460,7 @@ class Executor {
           firstBuyOnly: config.strategy.firstBuyOnly,
           buySlippageBps: config.strategy.buySlippageBps,
           firstBuySlippageBps: this._resolveFirstBuySlippageBps(order),
+          allowPredictedReserves: this._allowPredictedFirstBuyReserves(),
         });
         swapState = prepared.swapState;
         slippagePct = prepared.slippagePct;
@@ -1447,9 +1468,14 @@ class Executor {
         debugSlippagePct = slippagePct;
         debugExactReserveFence = exactReserveFence;
         if (exactReserveFence) {
-          stateSource += '+exact-dump';
+          stateSource += isPredictedReserveSource(order?.exactReserveSource)
+            ? '+predicted-dump'
+            : '+exact-dump';
           debugStateSource = stateSource;
           monitor.inc('Executor.firstBuyExactFenceBuilt', 1, 'Executor');
+          if (isPredictedReserveSource(order?.exactReserveSource)) {
+            monitor.inc('Executor.firstBuyPredictedFenceBuilt', 1, 'Executor');
+          }
         }
       } catch (err) {
         monitor.inc('Executor.firstBuyRejectedMissingState', 1, 'Executor');

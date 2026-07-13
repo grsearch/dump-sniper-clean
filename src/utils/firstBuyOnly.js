@@ -30,8 +30,38 @@ function getVerifiedExactReserves(order) {
   return { baseRaw, quoteRaw };
 }
 
+function isPredictedReserveSource(source) {
+  return source === 'predicted_reserve' || source === 'cache_estimate';
+}
+
+function getUsableFirstBuyReserves(order, { allowPredicted = false } = {}) {
+  const exact = getVerifiedExactReserves(order);
+  if (exact) return { ...exact, source: 'tx_post_balances', predicted: false };
+
+  if (!allowPredicted || !isPredictedReserveSource(order?.exactReserveSource)) {
+    return null;
+  }
+
+  const baseRaw = normalizeRawTokenAmount({ amount: order?.poolBaseAfterRaw });
+  const quoteRaw = normalizeRawTokenAmount({ amount: order?.poolQuoteAfterRaw });
+  if (!baseRaw || !quoteRaw || baseRaw === '0' || quoteRaw === '0') {
+    return null;
+  }
+
+  return {
+    baseRaw,
+    quoteRaw,
+    source: order.exactReserveSource,
+    predicted: true,
+  };
+}
+
 function hasVerifiedExactReserves(order) {
   return getVerifiedExactReserves(order) !== null;
+}
+
+function hasUsableFirstBuyReserves(order, opts) {
+  return getUsableFirstBuyReserves(order, opts) !== null;
 }
 
 function prepareBuyQuoteState({
@@ -40,6 +70,7 @@ function prepareBuyQuoteState({
   firstBuyOnly,
   buySlippageBps,
   firstBuySlippageBps = 0,
+  allowPredictedReserves = false,
 }) {
   if (!firstBuyOnly) {
     return {
@@ -53,15 +84,18 @@ function prepareBuyQuoteState({
     throw new Error('first_buy_only: pool metadata cache miss');
   }
 
-  if (order?.exactReserveSource !== 'tx_post_balances') {
+  const reserves = getUsableFirstBuyReserves(order, { allowPredicted: allowPredictedReserves });
+  if (!reserves) {
+    const source = order?.exactReserveSource || 'none';
+    if (source === 'tx_post_balances') {
+      throw new Error('first_buy_only: exact post-dump reserves unavailable');
+    }
+    if (allowPredictedReserves && isPredictedReserveSource(source)) {
+      throw new Error('first_buy_only: predicted post-dump reserves unavailable');
+    }
     throw new Error('first_buy_only: exact post-dump reserves not verified');
   }
-
-  const exactReserves = getVerifiedExactReserves(order);
-  if (!exactReserves) {
-    throw new Error('first_buy_only: exact post-dump reserves unavailable');
-  }
-  const { baseRaw, quoteRaw } = exactReserves;
+  const { baseRaw, quoteRaw } = reserves;
 
   return {
     swapState: {
@@ -79,7 +113,10 @@ function prepareBuyQuoteState({
 
 module.exports = {
   getVerifiedExactReserves,
+  getUsableFirstBuyReserves,
   hasVerifiedExactReserves,
+  hasUsableFirstBuyReserves,
+  isPredictedReserveSource,
   normalizeRawTokenAmount,
   prepareBuyQuoteState,
 };

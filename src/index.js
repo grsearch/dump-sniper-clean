@@ -29,7 +29,7 @@ async function main() {
   console.log(`TP: +${config.strategy.takeProfitPct}% (immediate, no confirm)`);
   console.log(`Trailing: arm at +${config.strategy.trailingActivatePct}% / drawdown ${config.strategy.trailingDrawdownPct}% (priority: TP > trailing)`);
   console.log(`Trigger: sell>=${config.strategy.minSellSol} SOL, impact ${config.strategy.minPriceImpactPct}-${config.strategy.maxPriceImpactPct}%`);
-  console.log(`First-buy fence: ${config.strategy.firstBuyOnly ? `ENABLED (verified reserves, tolerance ${config.strategy.firstBuySlippageBps}bps)` : 'disabled'}`);
+  console.log(`First-buy fence: ${config.strategy.firstBuyOnly ? `ENABLED (reserveMode=${config.strategy.firstBuyReserveMode}, exact=${config.strategy.firstBuySlippageBps}bps, predicted=${config.strategy.firstBuyPredictedSlippageBps}bps)` : 'disabled'}`);
   console.log(`Watchdog: FDV>=$${config.strategy.minFdVUsd}, LP>=${config.strategy.minLpSol} SOL (15s check)`);
   console.log(`Emergency stop: ${config.strategy.emergencyStopLossPct}%`);
   console.log(`Max hold: ${config.strategy.maxHoldMs > 0 ? config.strategy.maxHoldMs + 'ms' : 'disabled'}`);

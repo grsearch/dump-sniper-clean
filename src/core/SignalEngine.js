@@ -3,7 +3,7 @@
 const EventEmitter = require('events');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { hasVerifiedExactReserves } = require('../utils/firstBuyOnly');
+const { hasUsableFirstBuyReserves } = require('../utils/firstBuyOnly');
 
 const monitor = getMonitor();
 // SignalEngine 只在收到 dump 信号时 beat，没信号时不会心跳。砸盘信号本来就稀疏，
@@ -904,13 +904,18 @@ class SignalEngine extends EventEmitter {
     // "BUY_SIGNAL accepted" must mean the order will actually enter the BUY path.
     // If firstBuyOnly rejection happens later inside Executor, the dashboard looks
     // like it accepted a signal but never bought. Reject it here instead.
-    if (config.strategy.firstBuyOnly && !hasVerifiedExactReserves(signal)) {
+    const allowPredictedFirstBuy = config.strategy.firstBuyReserveMode === 'speed_first';
+    if (
+      config.strategy.firstBuyOnly &&
+      !hasUsableFirstBuyReserves(signal, { allowPredicted: allowPredictedFirstBuy })
+    ) {
       const source = signal.exactReserveSource || 'none';
       const baseRaw = signal.poolBaseAfterRaw ? 'yes' : 'no';
       const quoteRaw = signal.poolQuoteAfterRaw ? 'yes' : 'no';
+      const expected = allowPredictedFirstBuy ? 'exact/predicted reserves' : 'exact reserves';
       this._logReject(
         signal,
-        `first_buy_only: exact reserves not verified (source=${source}, baseRaw=${baseRaw}, quoteRaw=${quoteRaw})`,
+        `first_buy_only: ${expected} not verified (source=${source}, baseRaw=${baseRaw}, quoteRaw=${quoteRaw})`,
       );
       return;
     }
