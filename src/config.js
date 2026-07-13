@@ -141,6 +141,8 @@ const config = {
     firstBuyReserveMode: (process.env.FIRST_BUY_RESERVE_MODE || 'speed_first').toLowerCase(),
     firstBuySlippageBps: parseInt(process.env.FIRST_BUY_SLIPPAGE_BPS || '200', 10),
     firstBuyPredictedSlippageBps: parseInt(process.env.FIRST_BUY_PREDICTED_SLIPPAGE_BPS || '300', 10),
+    firstBuyPredictedMinImpactPct: parseFloat(process.env.FIRST_BUY_PREDICTED_MIN_IMPACT_PCT || '20'),
+    firstBuyPredictedMaxCacheAgeMs: parseInt(process.env.FIRST_BUY_PREDICTED_MAX_CACHE_AGE_MS || '1000', 10),
     // 防错池 vault：tx_post_balances 精确储备与当前 pool metadata/cache 储备差异过大时拒绝 BUY
     firstBuyReserveMismatchMaxPct: parseFloat(process.env.FIRST_BUY_RESERVE_MISMATCH_MAX_PCT || '50'),
     // 防 tiny-fill：SDK 算出的 token 数量按真实 pool 中间价折算，低于下单额该比例则拒绝 BUY
@@ -196,14 +198,14 @@ const config = {
     firstBuyStrictMaxRawCompetingBuys: parseInt(process.env.FIRST_BUY_STRICT_MAX_RAW_COMPETING_BUYS || '0', 10),
     firstBuyStrictMaxRawCompetingSol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_RAW_COMPETING_SOL || '0'),
     firstBuyStrictMaxSingleCompetingBuySol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_SINGLE_COMPETING_BUY_SOL || '0'),
-    firstBuyStrictMaxSellSol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_SELL_SOL || '15'),
+    firstBuyStrictMaxSellSol: parseFloat(process.env.FIRST_BUY_STRICT_MAX_SELL_SOL || '50'),
     firstBuyStrictMaxSignalAgeMs: parseInt(process.env.FIRST_BUY_STRICT_MAX_SIGNAL_AGE_MS || '800', 10),
     firstBuyStrictMaxSlippageBps: parseInt(process.env.FIRST_BUY_STRICT_MAX_SLIPPAGE_BPS || '300', 10),
     // Keep the default tight, and only widen for known low-competition same-slot
     // entries. This is not a global high-slippage mode.
     firstBuyDynamicSlippage: (process.env.FIRST_BUY_DYNAMIC_SLIPPAGE ?? 'true').toLowerCase() === 'true',
     firstBuyLowCompetitionSlippageBps: parseInt(process.env.FIRST_BUY_LOW_COMPETITION_SLIPPAGE_BPS || '300', 10),
-    firstBuyLowCompetitionMaxSellSol: parseFloat(process.env.FIRST_BUY_LOW_COMPETITION_MAX_SELL_SOL || '20'),
+    firstBuyLowCompetitionMaxSellSol: parseFloat(process.env.FIRST_BUY_LOW_COMPETITION_MAX_SELL_SOL || '50'),
     // skip = do not submit low-confidence BUYs at all (saves fee);
     // low_fee = still try them with LOW_CONFIDENCE_BUY_PRIORITY_FEE_LAMPORTS.
     lowConfidenceBuyAction: (process.env.LOW_CONFIDENCE_BUY_ACTION || 'skip').toLowerCase(),

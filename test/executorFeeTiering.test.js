@@ -78,7 +78,21 @@ test('fee tiering downgrades risky first-buy candidates to low fee', () => {
       exactReserveFence: true,
     });
     assert.equal(largeSell.feeMode, 'low_confidence');
-    assert.match(largeSell.reason, /strict_large_sell/);
+    assert.match(largeSell.reason, /large_sell/);
+
+    const strictTooLarge = executor._classifyBuySubmission({
+      exactReserveSource: 'tx_post_balances',
+      sellSol: 55,
+      _slotGap: 0,
+      _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 100,
+    }, {
+      slippagePct: 2,
+      exactReserveFence: true,
+    });
+    assert.equal(strictTooLarge.feeMode, 'low_confidence');
+    assert.match(strictTooLarge.reason, /strict_large_sell/);
 
     const competition = executor._classifyBuySubmission({
       exactReserveSource: 'tx_post_balances',

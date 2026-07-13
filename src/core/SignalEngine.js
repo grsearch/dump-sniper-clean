@@ -3,7 +3,7 @@
 const EventEmitter = require('events');
 const { config } = require('../config');
 const { getMonitor } = require('../monitor/HealthMonitor');
-const { hasUsableFirstBuyReserves } = require('../utils/firstBuyOnly');
+const { hasUsableFirstBuyReserves, isPredictedReserveSource } = require('../utils/firstBuyOnly');
 
 const monitor = getMonitor();
 // SignalEngine 只在收到 dump 信号时 beat，没信号时不会心跳。砸盘信号本来就稀疏，
@@ -919,6 +919,12 @@ class SignalEngine extends EventEmitter {
       );
       return;
     }
+    const predictedCheck = this._checkPredictedReserveSignal(signal);
+    if (!predictedCheck.ok) {
+      monitor.inc('SignalEngine.rejectedPredictedReserve', 1, 'SignalEngine');
+      this._logReject(signal, predictedCheck.reason);
+      return;
+    }
 
     // BUY submission freshness gate: if the dump is already old by local slot
     // time, the needle has likely passed. Reject before BUY to avoid fees.
@@ -1155,6 +1161,41 @@ class SignalEngine extends EventEmitter {
         this.inflightBuys.delete(mint);
       }
     }
+  }
+
+  _checkPredictedReserveSignal(signal) {
+    const source = signal?.exactReserveSource || 'none';
+    if (config.strategy.firstBuyReserveMode !== 'speed_first' || !isPredictedReserveSource(source)) {
+      return { ok: true };
+    }
+
+    const impact = Number(signal?.priceImpactPct) || 0;
+    const minImpact = Number(config.strategy.firstBuyPredictedMinImpactPct);
+    if (Number.isFinite(minImpact) && minImpact > 0 && impact < minImpact) {
+      return {
+        ok: false,
+        reason: `predicted_reserve impact:${impact.toFixed(1)}%<${minImpact}%`,
+      };
+    }
+
+    const maxAgeMs = Number(config.strategy.firstBuyPredictedMaxCacheAgeMs);
+    if (Number.isFinite(maxAgeMs) && maxAgeMs > 0) {
+      const ageMs = Number(signal?.predictedReserveCacheAgeMs);
+      if (!Number.isFinite(ageMs)) {
+        return {
+          ok: false,
+          reason: `predicted_reserve cache_age:unknown>${maxAgeMs}ms`,
+        };
+      }
+      if (ageMs > maxAgeMs) {
+        return {
+          ok: false,
+          reason: `predicted_reserve cache_age:${Math.round(ageMs)}ms>${maxAgeMs}ms`,
+        };
+      }
+    }
+
+    return { ok: true };
   }
 
   _logReject(signal, reason) {
