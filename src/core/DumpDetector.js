@@ -421,6 +421,7 @@ class DumpDetector extends EventEmitter {
       poolBaseAfterRaw: parsed.poolBaseAfterRaw || null,
       poolQuoteAfterRaw: parsed.poolQuoteAfterRaw || null,
       exactReserveSource: parsed.exactReserveSource || null,
+      predictedReserveCacheAgeMs: parsed.predictedReserveCacheAgeMs ?? null,
       priceAfter: parsed.priceAfter,
       priceBefore: parsed.priceBefore,
       baseDecimals: parsed.baseDecimals,
@@ -457,6 +458,7 @@ class DumpDetector extends EventEmitter {
       poolBaseAfterRaw: parsed.poolBaseAfterRaw || null,
       poolQuoteAfterRaw: parsed.poolQuoteAfterRaw || null,
       exactReserveSource: parsed.exactReserveSource || null,
+      predictedReserveCacheAgeMs: parsed.predictedReserveCacheAgeMs ?? null,
       baseDecimals: parsed.baseDecimals,
       quoteDecimals: parsed.quoteDecimals,
     });
@@ -557,6 +559,7 @@ class DumpDetector extends EventEmitter {
       poolBaseAfterRaw: lastSell.poolBaseAfterRaw || null,
       poolQuoteAfterRaw: lastSell.poolQuoteAfterRaw || null,
       exactReserveSource: lastSell.exactReserveSource || null,
+      predictedReserveCacheAgeMs: lastSell.predictedReserveCacheAgeMs ?? null,
       priceAfter: lastSell.priceAfter,
       priceBefore: firstSell.priceBefore,
       baseDecimals: lastSell.baseDecimals,
@@ -892,12 +895,16 @@ class DumpDetector extends EventEmitter {
     const poolState = this.poolStateCache
       ? this.poolStateCache.get(tokenInfo.pool_address)
       : null;
+    const poolStateCacheAgeMs = poolState && this.poolStateCache
+      ? this.poolStateCache.getAge(tokenInfo.pool_address)
+      : null;
 
     let quoteAmount = 0;
     let priceBefore = 0;
     let priceAfter = 0;
     let priceChangePct = 0;
     let poolQuoteAfter = 0;
+    let predictedReserveCacheAgeMs = null;
 
     if (poolState && poolState.poolQuoteAmount && poolState.poolBaseAmount) {
       // 有实时池子状态,用 AMM 常数乘积精确计算
@@ -921,6 +928,7 @@ class DumpDetector extends EventEmitter {
           if (predictedQuoteRaw) {
             poolQuoteAfterRaw = predictedQuoteRaw;
             exactReserveSource = 'predicted_reserve';
+            predictedReserveCacheAgeMs = poolStateCacheAgeMs;
             monitor.inc('DumpDetector.predictedReserveBuilt', 1, 'DumpDetector');
           }
         }
@@ -1002,6 +1010,7 @@ class DumpDetector extends EventEmitter {
       poolBaseAfterRaw,
       poolQuoteAfterRaw,
       exactReserveSource,
+      predictedReserveCacheAgeMs,
       _poolBaseDelta: poolBaseDelta,
       source: 'cpi',
     };
@@ -1277,6 +1286,9 @@ class DumpDetector extends EventEmitter {
     const poolState = this.poolStateCache
       ? this.poolStateCache.get(tokenInfo.pool_address)
       : null;
+    const poolStateCacheAgeMs = poolState && this.poolStateCache
+      ? this.poolStateCache.getAge(tokenInfo.pool_address)
+      : null;
 
     if (poolState && poolState.poolQuoteAmount && poolState.poolBaseAmount) {
       const qBefore = poolState.poolQuoteAmount.toNumber
@@ -1299,6 +1311,7 @@ class DumpDetector extends EventEmitter {
           ? 'predicted_reserve'
           : 'cache_estimate';
         if (exactReserveSource === 'predicted_reserve') {
+          predictedReserveCacheAgeMs = poolStateCacheAgeMs;
           monitor.inc('DumpDetector.predictedReserveBuilt', 1, 'DumpDetector');
         }
       }
@@ -1360,6 +1373,7 @@ class DumpDetector extends EventEmitter {
       poolBaseAfterRaw,
       poolQuoteAfterRaw,
       exactReserveSource,
+      predictedReserveCacheAgeMs,
       source: 'balance_only',
     };
   }

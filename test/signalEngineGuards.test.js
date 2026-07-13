@@ -91,3 +91,48 @@ test('6004 fee-burn guard only cools after consecutive slippage failures', () =>
     assert.equal(engine._buy6004Failures.has('mintC'), false);
   });
 });
+
+test('predicted reserve guard requires stronger impact and fresh cache', () => {
+  withStrategy({
+    firstBuyReserveMode: 'speed_first',
+    firstBuyPredictedMinImpactPct: 20,
+    firstBuyPredictedMaxCacheAgeMs: 1000,
+  }, () => {
+    const engine = makeEngine();
+
+    assert.deepEqual(
+      engine._checkPredictedReserveSignal({
+        exactReserveSource: 'predicted_reserve',
+        priceImpactPct: 17,
+        predictedReserveCacheAgeMs: 100,
+      }),
+      { ok: false, reason: 'predicted_reserve impact:17.0%<20%' },
+    );
+
+    assert.deepEqual(
+      engine._checkPredictedReserveSignal({
+        exactReserveSource: 'predicted_reserve',
+        priceImpactPct: 22,
+        predictedReserveCacheAgeMs: 1500,
+      }),
+      { ok: false, reason: 'predicted_reserve cache_age:1500ms>1000ms' },
+    );
+
+    assert.deepEqual(
+      engine._checkPredictedReserveSignal({
+        exactReserveSource: 'predicted_reserve',
+        priceImpactPct: 22,
+        predictedReserveCacheAgeMs: 500,
+      }),
+      { ok: true },
+    );
+
+    assert.deepEqual(
+      engine._checkPredictedReserveSignal({
+        exactReserveSource: 'tx_post_balances',
+        priceImpactPct: 8,
+      }),
+      { ok: true },
+    );
+  });
+});
