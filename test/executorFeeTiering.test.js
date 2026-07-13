@@ -168,6 +168,38 @@ test('strict needle caps widened dynamic slippage', () => {
   });
 });
 
+test('speed-first predicted reserves can receive high-confidence fee with capped slippage', () => {
+  withStrategy({
+    firstBuyOnly: true,
+    firstBuyReserveMode: 'speed_first',
+    firstBuyDynamicSlippage: true,
+    firstBuySlippageBps: 200,
+    firstBuyPredictedSlippageBps: 500,
+    firstBuyStrictMaxSlippageBps: 300,
+    firstBuyNeedleMode: 'strict',
+    firstBuyLowCompetitionMaxSellSol: 20,
+  }, () => {
+    const executor = makeExecutor();
+    const order = {
+      exactReserveSource: 'predicted_reserve',
+      sellSol: 12,
+      _slotGap: 0,
+      _poolCompetition: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _poolCompetitionRaw: { buyCount: 0, buySol: 0, maxSingleBuySol: 0 },
+      _dumpTsToSubmitMs: 100,
+    };
+
+    assert.equal(executor._resolveFirstBuySlippageBps(order), 300);
+
+    const plan = executor._classifyBuySubmission(order, {
+      slippagePct: 3,
+      exactReserveFence: true,
+    });
+    assert.equal(plan.feeMode, 'high_confidence');
+    assert.match(plan.reason, /needle/);
+  });
+});
+
 test('low-confidence action can skip before signing and submitting', () => {
   withStrategy({ lowConfidenceBuyAction: 'skip' }, () => {
     const executor = makeExecutor();
